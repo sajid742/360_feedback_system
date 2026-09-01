@@ -1,0 +1,126 @@
+name: CI
+
+# Build + typecheck + automated tests for every push and PR (F23, builds on the
+# F16 test suite). Boots Postgres, applies the schema, seeds an admin tenant,
+# starts the API, and runs the black-box API integration tests + web build.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: enterprise360
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d enterprise360"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/enterprise360
+      JWT_ACCESS_SECRET: ci-access-secret
+      JWT_REFRESH_SECRET: ci-refresh-secret
+      MFA_ENCRYPTION_KEY: ci0ci0ci0ci0ci0ci0ci0ci0ci0ci0ci0ci0ci0ci0A=
+      PORT: '3000'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (api + web)
+        run: npm run typecheck
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Apply database schema
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d enterprise360 -v ON_ERROR_STOP=1 -f database/000_initial_schema.sql
+          PGPASSWORD=postgres psql -h localhost -U postgres -d enterprise360 -v ON_ERROR_STOP=1 -f database/001_reconcile.sql
+
+      # The full seed chain, in the same order as docs/DEMO_DATA.md.
+      #  - bootstrap is called on the workspace directly (`-w apps/api`). The root
+      #    `db:bootstrap-tenant` script is itself an `npm run`, and the second npm
+      #    hop swallows the flags after `--` as npm config, so the admin was created
+      #    with the default password and every test login failed.
+      #  - `--no-starter-content` stops the tenant getting a second published
+      #    questionnaire, which db:sample also provides.
+      #  - db:demo is required: it assigns RBAC roles to the 50 sample employees.
+      #    Without it they hold no role at all and the auth/RBAC tests fail.
+      - name: Seed permissions, roles, admin tenant, sample and demo data
+        run: |
+          npm run db:seed
+          npm run db:seed-roles
+          npm run -w apps/api db:bootstrap-tenant -- --no-starter-content --slug care --email sajidq@carepvtltd.com --password 'Password123!'
+          npm run db:sample
+          npm run db:demo
+
+      - name: Build API
+        run: npm run build:api
+
+      - name: Build Web
+        run: npm run build:web
+
+      - name: Install Playwright browser (for the UI smoke test)
+        run: npx playwright install --with-deps chromium
+
+      # The UI smoke test drives the Vite dev server, which proxies /api/v1 to the
+      # API (`vite preview` does not carry that proxy), so both are started here.
+      - name: Start API + web and run the API and UI tests
+        run: |
+          node apps/api/dist/main.js &
+          API_PID=$!
+          for i in $(seq 1 30); do
+            curl -sf -X POST http://localhost:3000/api/v1/auth/login \
+              -H 'Content-Type: application/json' \
+              -d '{"organizationSlug":"care","email":"sajidq@carepvtltd.com","password":"Password123!"}' && break
+            sleep 2
+          done
+
+          npm run -w apps/web dev -- --port 5173 --strictPort &
+          WEB_PID=$!
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:5173/login >/dev/null && break
+            sleep 2
+          done
+
+          set +e
+          npm test;        API_TESTS=$?
+          npm run test:ui; UI_TESTS=$?
+          set -e
+
+          kill $WEB_PID || true
+          kill $API_PID || true
+          exit $(( API_TESTS | UI_TESTS ))
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container images
+        run: |
+          docker build -f apps/api/Dockerfile -t e360-api .
+          docker build -f apps/web/Dockerfile -t e360-web .
+          docker build -f apps/mock-sis/Dockerfile -t e360-mock-sis .

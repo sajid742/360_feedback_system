@@ -1,0 +1,282 @@
+# Enterprise 360° Feedback System — the complete ecosystem, one command.
+#
+#   docker compose up -d        start everything (initialises itself on first run)
+#   docker compose down         stop and remove containers, KEEP the data
+#   docker compose down -v      ...and DELETE the data, including the WhatsApp session
+#
+# Compose prefers this file over docker-compose.yml, which is why plain
+# `docker compose up -d` starts the whole stack. `docker-compose.yml` is untouched and
+# still holds the two dependencies the from-source development workflow needs; it is
+# used explicitly by `npm run db:up`.
+#
+# Copy .env.docker.example to .env before the first run.
+#
+# ─────────────────────────── how the services talk ───────────────────────────
+#  Inside Docker, services address each other by SERVICE NAME, never localhost:
+#     api  → postgres:5432 · redis:6379 · mock-sis:3100 · waha:3000
+#     web  → api:3000 (nginx proxies /api/v1 and the short-link paths)
+#  From your browser they are on localhost (or your LAN IP) at the published ports:
+#     web http://localhost:8080 · api http://localhost:3000
+#     mock-sis http://localhost:3100 · waha http://localhost:3001
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: e360
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: e360-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # Only this one is created automatically; db-init creates mock_sis alongside it.
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise360}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-enterprise360}']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [e360]
+
+  redis:
+    image: redis:7-alpine
+    container_name: e360-redis
+    restart: unless-stopped
+    # Not published by default: nothing outside the stack needs it, and the API
+    # reaches it as redis:6379. Redis is OPTIONAL — with it unavailable the API
+    # falls back to inline delivery and /ready reports "degraded" but stays ready.
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [e360]
+
+  # One-shot initialisation. Runs the real seed chain, then exits. Every step is
+  # idempotent, so this runs on every `up` and is a fast no-op after the first time —
+  # there is no separate "first run only" command to remember. See ops/docker-init.sh.
+  db-init:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: tools
+    image: e360-api-tools
+    container_name: e360-db-init
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise360}
+      MOCK_SIS_DB: ${MOCK_SIS_DB:-mock_sis}
+      ORG_NAME: ${ORG_NAME:-CARE Pvt. Ltd.}
+      ORG_SLUG: ${ORG_SLUG:-care}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-sajidq@carepvtltd.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-Password123!}
+      # false gives a clean tenant: administrator, permissions and roles, no demo content.
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+      # Normally unset. `docker compose run --rm -e DEMO_RESEED=true db-init` regenerates
+      # the demo content from the current code — needed when a volume was first seeded by
+      # an older build, since db:demo's marker guard otherwise keeps that older data
+      # for ever. Never set on a normal start; it deletes and rebuilds demo content.
+      DEMO_RESEED: ${DEMO_RESEED:-false}
+      # Normally unset. `docker compose run --rm -e NEW_CLIENT=true … db-init` removes
+      # the previous client's/demo data and prepares the database for a new customer
+      # with generic starter content. Runs INSTEAD of demo seeding, never on a normal
+      # start. See ops/DOCKER.md §16.
+      NEW_CLIENT: ${NEW_CLIENT:-false}
+      NEW_CLIENT_DRY_RUN: ${NEW_CLIENT_DRY_RUN:-false}
+    networks: [e360]
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: runtime
+    image: e360-api
+    container_name: e360-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-enterprise360}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env — see .env.docker.example}
+      # Must be EXACTLY 64 hex characters. It also encrypts HR and SIS provider
+      # secrets, so losing it makes those unrecoverable — back it up with the volume.
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?set MFA_ENCRYPTION_KEY in .env — 64 hex chars}
+      # The origin the BROWSER uses. Set it to your LAN URL for multi-device access.
+      CORS_ORIGIN: ${PUBLIC_APP_URL:-http://localhost:8080}
+      # The base for links in outgoing email, password resets and parent-evaluation
+      # QR codes. Left at localhost, recipients get links only the server can open.
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:8080}
+      # Client identity. Read at RUNTIME, so one image serves every client and changing
+      # any of these needs a restart, never a rebuild.
+      DEFAULT_ORG_SLUG: ${DEFAULT_ORG_SLUG:-${ORG_SLUG:-care}}
+      # Licensing. The licence itself lives in PostgreSQL (configurations table), so it
+      # survives container restarts and is covered by the normal database backup.
+      LICENSE_PUBLIC_KEY: ${LICENSE_PUBLIC_KEY:-}
+      LICENSE_REQUIRE: ${LICENSE_REQUIRE:-}
+      BRAND_APP_NAME: ${BRAND_APP_NAME:-}
+      BRAND_ORG_NAME: ${BRAND_ORG_NAME:-}
+      BRAND_SHORT_NAME: ${BRAND_SHORT_NAME:-}
+      BRAND_LEGAL_NAME: ${BRAND_LEGAL_NAME:-}
+      BRAND_TAGLINE: ${BRAND_TAGLINE:-}
+      BRAND_PRIMARY_COLOR: ${BRAND_PRIMARY_COLOR:-}
+      BRAND_ACCENT_COLOR: ${BRAND_ACCENT_COLOR:-}
+      BRAND_CORNER_STYLE: ${BRAND_CORNER_STYLE:-}
+      BRAND_SUPPORT_EMAIL: ${BRAND_SUPPORT_EMAIL:-}
+      BRAND_SUPPORT_PHONE: ${BRAND_SUPPORT_PHONE:-}
+      BRAND_WEBSITE: ${BRAND_WEBSITE:-}
+      BRAND_LOGO_URL: ${BRAND_LOGO_URL:-}
+      BRAND_FAVICON_URL: ${BRAND_FAVICON_URL:-}
+      # Service name, not localhost — the API and Mock SIS are separate containers.
+      SIS_BASE_URL: http://mock-sis:3100/api/v1
+      SIS_API_KEY: ${SIS_API_KEY:-mock-sis-dev-key-change-me}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-log}
+      TZ: ${TZ:-UTC}
+    ports:
+      - '${API_PORT:-3000}:3000'
+    healthcheck:
+      # /health and /ready sit at the ROOT, outside the /api/v1 prefix. The slim image
+      # has no curl, so this probes with node.
+      test: ['CMD', 'node', '-e', "require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [e360]
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_DEFAULT_ORG_SLUG: ${ORG_SLUG:-care}
+    image: e360-web
+    container_name: e360-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - '${WEB_PORT:-8080}:80'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost/']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [e360]
+
+  # A genuine standalone vendor service with its own NestJS app, its own Prisma schema
+  # and its own database — not a stub inside the API. Mock HR, by contrast, is an
+  # in-process provider class in the API and correctly has no container here.
+  mock-sis:
+    build:
+      context: .
+      dockerfile: apps/mock-sis/Dockerfile
+    image: e360-mock-sis
+    container_name: e360-mock-sis
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 3100
+      # The schema reads MOCK_SIS_DATABASE_URL — not DATABASE_URL.
+      MOCK_SIS_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${MOCK_SIS_DB:-mock_sis}
+      # Must match the API's SIS_API_KEY or every call is refused.
+      SIS_API_KEY: ${SIS_API_KEY:-mock-sis-dev-key-change-me}
+    ports:
+      - '${MOCK_SIS_PORT:-3100}:3100'
+    healthcheck:
+      # Its health route is NOT excluded from the global prefix, so unlike the API
+      # it answers at /api/v1/health rather than /health.
+      test: ['CMD', 'node', '-e', "require('http').get('http://localhost:3100/api/v1/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [e360]
+
+  # WhatsApp HTTP API. The application already ships `waha` as a first-class WhatsApp
+  # provider (WahaTransport → POST {baseUrl}/api/sendText with an X-Api-Key header), so
+  # nothing in the app changes — you point its WhatsApp settings at http://waha:3000.
+  #
+  # Connecting WhatsApp needs a QR scan with a real phone, which cannot be automated.
+  # The session lives in the waha_sessions volume and survives restarts.
+  #
+  # TWO different credentials, easily confused:
+  #   WAHA_API_KEY            -> the X-Api-Key header. This is what the 360 app sends,
+  #                              and what you enter at Communication -> WhatsApp.
+  #   WAHA_DASHBOARD_PASSWORD -> HTTP basic auth for the /dashboard page in your browser.
+  # WAHA also REJECTS weak values ('', 'admin', 'waha', '123', all-zeros) and silently
+  # substitutes a random one, so both must be real strings.
+  waha:
+    image: ${WAHA_IMAGE:-devlikeapro/waha:latest}
+    container_name: e360-waha
+    restart: unless-stopped
+    environment:
+      WHATSAPP_API_KEY: ${WAHA_API_KEY:-change-me-waha-key}
+      # The dashboard and the API-docs page are behind HTTP basic auth, which is
+      # SEPARATE from the API key. Pin them here: left unset, WAHA generates a new
+      # random password on EVERY start and only prints it to its log.
+      WAHA_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME:-admin}
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASSWORD:?set WAHA_DASHBOARD_PASSWORD in .env — run start-docker.ps1 or ops/init-env.ps1}
+      WHATSAPP_SWAGGER_USERNAME: ${WAHA_DASHBOARD_USERNAME:-admin}
+      WHATSAPP_SWAGGER_PASSWORD: ${WAHA_DASHBOARD_PASSWORD:?set WAHA_DASHBOARD_PASSWORD in .env}
+      WHATSAPP_DEFAULT_ENGINE: ${WAHA_ENGINE:-WEBJS}
+      WHATSAPP_RESTART_ALL_SESSIONS: 'True'
+      WAHA_PRINT_QR: 'False'
+      TZ: ${TZ:-UTC}
+    ports:
+      # Published on 3001 because the API already owns 3000 on the host. Inside the
+      # network WAHA still listens on 3000, hence http://waha:3000 for the API.
+      - '${WAHA_PORT:-3001}:3000'
+    volumes:
+      - waha_sessions:/app/.sessions
+      - waha_media:/app/.media
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:3000/ping || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # WAHA boots a browser engine; it is genuinely slow to become ready.
+      start_period: 90s
+    networks: [e360]
+
+volumes:
+  # THE one that matters: every organisation, employee, cycle, response and score.
+  pgdata:
+  # BullMQ delivery queue only. Losing it costs at most in-flight notifications.
+  redisdata:
+  # The linked WhatsApp session. Delete this and you must scan the QR code again.
+  waha_sessions:
+  waha_media:
+
+networks:
+  e360:
+    driver: bridge

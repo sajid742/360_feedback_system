@@ -1,0 +1,71 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Brand design tokens matched to 360_appraisal_system_reference.html (visual
+ * reference only — never converted directly). Purple/teal system, soft-gray
+ * app background, dark gradient sidebar, Inter typeface.
+ */
+:root {
+  --brand: #6d5dfc;
+  --brand-light: #8b7dff;
+  --brand-dark: #5346d9;
+  --brand-2: #46c2cb;
+
+  --radius: 0.75rem;
+
+  --background: 231 40% 97%; /* #f5f6fb */
+  --foreground: 232 25% 18%;
+  --card: 0 0% 100%;
+  --card-foreground: 232 25% 18%;
+  --muted: 231 30% 96%;
+  --muted-foreground: 232 12% 46%;
+  --secondary: 231 30% 94%;
+  --secondary-foreground: 232 25% 24%;
+  --border: 231 24% 90%;
+  --input: 231 24% 88%;
+  --ring: 250 96% 68%;
+  --destructive: 0 72% 56%;
+
+  /* Sidebar gradient used by the AppShell (documented for continuity). */
+  --sidebar-gradient: linear-gradient(180deg, #1c1840, #241f53);
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+body {
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/**
+ * Soft badge system ("badge-soft-*") from the reference. Tinted background +
+ * saturated foreground. Exposed as Tailwind component classes so the Badge
+ * component and any ad-hoc usage share one source of truth.
+ */
+@layer components {
+  .badge-soft-success {
+    @apply bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20;
+  }
+  .badge-soft-warning {
+    @apply bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20;
+  }
+  .badge-soft-danger {
+    @apply bg-red-50 text-red-700 ring-1 ring-inset ring-red-600/20;
+  }
+  .badge-soft-info {
+    @apply bg-sky-50 text-sky-700 ring-1 ring-inset ring-sky-600/20;
+  }
+  .badge-soft-brand {
+    @apply bg-indigo-50 text-indigo-700 ring-1 ring-inset ring-indigo-600/20;
+  }
+  .badge-soft-neutral {
+    @apply bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-500/20;
+  }
+}

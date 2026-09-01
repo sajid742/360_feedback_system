@@ -1,0 +1,68 @@
+{
+  "name": "@enterprise-360/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NestJS API for the Enterprise 360 system",
+  "scripts": {
+    "dev": "npx nest start --watch",
+    "build": "npx nest build",
+    "start": "node dist/main.js",
+    "db:generate": "npx prisma@5.22.0 generate",
+    "db:seed": "node scripts/run-ts.js prisma/seed.ts",
+    "db:bootstrap-tenant": "node scripts/run-ts.js scripts/bootstrap-tenant.ts",
+    "db:sample": "node scripts/run-ts.js scripts/sample-data.ts",
+    "db:validate": "npx prisma@5.22.0 validate",
+    "typecheck": "npx tsc --noEmit",
+    "db:seed-roles": "node scripts/run-ts.js scripts/seed-roles.ts",
+    "test:api": "node --test test/*.test.mjs",
+    "bootstrap": "node dist/provisioning/bootstrap.cli.js",
+    "db:demo": "node scripts/run-ts.js scripts/demo-data.ts",
+    "db:purge-client": "node scripts/run-ts.js scripts/purge-client.ts",
+    "db:new-client": "node scripts/run-ts.js scripts/new-client.ts",
+    "license:keygen": "node scripts/license.cjs keygen",
+    "license:create": "node scripts/license.cjs create",
+    "license:inspect": "node scripts/license.cjs inspect",
+    "license:verify": "node scripts/license.cjs verify"
+  },
+  "prisma": {
+    "seed": "ts-node --transpile-only prisma/seed.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^10.3.7",
+    "@nestjs/core": "^10.3.7",
+    "@nestjs/jwt": "^10.2.0",
+    "@nestjs/passport": "^10.0.3",
+    "@nestjs/platform-express": "^10.3.7",
+    "@nestjs/schedule": "^6.1.3",
+    "@nestjs/throttler": "^6.5.0",
+    "@prisma/client": "^5.22.0",
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.8.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "ldapjs": "^3.0.7",
+    "nodemailer": "^6.9.13",
+    "passport": "^0.7.0",
+    "passport-jwt": "^4.0.1",
+    "qrcode": "^1.5.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "optionalDependencies": {
+    "ssh2-sftp-client": "^11.0.0"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^10.3.2",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.7",
+    "@types/nodemailer": "^6.4.15",
+    "@types/passport-jwt": "^4.0.1",
+    "@types/qrcode": "^1.5.5",
+    "prisma": "^5.22.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mock SIS — Administration</title>
+<style>
+  :root{
+    --bg:#f4f6fb; --card:#fff; --ink:#1f2637; --muted:#6b7385; --line:#e4e8f2;
+    --brand:#6d5dfc; --brand-d:#5346d9; --ok:#10b981; --danger:#e11d48; --amber:#e08a00;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink);font-size:14px}
+  header{background:linear-gradient(90deg,#6d5dfc,#5346d9);color:#fff;padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+  header h1{font-size:18px;margin:0;font-weight:800;letter-spacing:.2px}
+  header .sub{font-size:12px;opacity:.85}
+  .wrap{max-width:1200px;margin:0 auto;padding:18px 22px}
+  nav{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px;background:#fff;padding:6px;border-radius:12px;border:1px solid var(--line)}
+  nav button{border:0;background:transparent;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer}
+  nav button.active{background:var(--brand);color:#fff}
+  nav button:hover:not(.active){background:#eef0f8;color:var(--ink)}
+  .toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+  .toolbar h2{margin:0;font-size:18px;font-weight:800}
+  .toolbar .right{display:flex;gap:8px;align-items:center}
+  input,select{height:36px;border:1px solid var(--line);border-radius:8px;padding:0 10px;font-size:13px;background:#fff;color:var(--ink);width:100%}
+  input:focus,select:focus{outline:2px solid #c9c2ff;border-color:var(--brand)}
+  .search{width:220px}
+  button.btn{height:36px;border:0;border-radius:8px;padding:0 14px;font-weight:600;font-size:13px;cursor:pointer;background:var(--brand);color:#fff;white-space:nowrap}
+  button.btn:hover{background:var(--brand-d)}
+  button.btn.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
+  button.btn.ghost:hover{background:#f2f4fa}
+  button.btn.danger{background:#fff;color:var(--danger);border:1px solid #f3c9d3}
+  button.btn.danger:hover{background:#fdecef}
+  button.mini{height:30px;padding:0 10px;font-size:12px;border-radius:7px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{background:#f7f8fc;text-align:left;padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);position:sticky;top:0}
+  td{padding:10px 12px;border-top:1px solid var(--line);vertical-align:middle}
+  tr:hover td{background:#fafbff}
+  .tablewrap{max-height:60vh;overflow:auto}
+  .empty{padding:40px;text-align:center;color:var(--muted)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#eef0f8;color:#555}
+  .pill.active{background:#e7f8f1;color:#0a7a53}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  .count{font-size:12px;color:var(--muted)}
+  /* modal */
+  .overlay{position:fixed;inset:0;background:rgba(20,24,40,.45);display:none;align-items:flex-start;justify-content:center;padding:30px 16px;overflow:auto;z-index:20}
+  .overlay.open{display:flex}
+  .modal{background:#fff;border-radius:14px;width:100%;max-width:640px;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+  .modal h3{margin:0;padding:16px 20px;border-bottom:1px solid var(--line);font-size:16px}
+  .form{padding:18px 20px;display:grid;grid-template-columns:1fr 1fr;gap:12px 16px}
+  .field{display:flex;flex-direction:column;gap:5px}
+  .field.full{grid-column:1 / -1}
+  .field label{font-size:12px;font-weight:600;color:var(--muted)}
+  .field label .req{color:var(--danger)}
+  .modal .actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;border-top:1px solid var(--line)}
+  .err{background:#fdecef;color:#a4133c;border:1px solid #f3c9d3;padding:9px 12px;border-radius:8px;margin:0 20px;font-size:13px}
+  .info{background:#eef0ff;border:1px solid #d8dbff;color:#333;border-radius:12px;padding:16px 18px;line-height:1.55}
+  .info code{background:#fff;border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+  .step{display:flex;gap:10px;margin-top:10px}
+  .step .n{flex:0 0 24px;height:24px;border-radius:999px;background:var(--brand);color:#fff;font-weight:700;display:grid;place-items:center;font-size:12px}
+  a{color:var(--brand-d);font-weight:600}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#12331f;color:#d7ffe9;padding:10px 16px;border-radius:10px;font-size:13px;opacity:0;transition:opacity .2s;z-index:40}
+  .toast.show{opacity:1}
+  @media(max-width:640px){.form{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Mock SIS · Administration</h1>
+    <div class="sub">Data entry &amp; testing for the Student Information System</div>
+  </div>
+  <div class="sub" id="dbline">—</div>
+</header>
+
+<div class="wrap">
+  <nav id="tabs"></nav>
+  <div id="view"></div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h3 id="mTitle">Edit</h3>
+    <div class="err" id="mErr" style="display:none"></div>
+    <div class="form" id="mForm"></div>
+    <div class="actions">
+      <button class="btn ghost" onclick="closeForm()">Cancel</button>
+      <button class="btn" id="mSave" onclick="saveForm()">Save</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '/admin/api';
+let LOOKUPS = {};
+let CURRENT = 'students';
+let EDIT = null; // record being edited (null = new)
+
+/* ---------------- entity configuration ---------------- */
+const ENTITIES = {
+  students: {
+    label: 'Students', endpoint: 'students', search: true, idField: 'id',
+    columns: [
+      {key:'registrationNo', label:'Reg. No', mono:true},
+      {key:'name', label:'Name'},
+      {key:'rollNo', label:'Roll No'},
+      {key:'gender', label:'Gender'},
+      {key:'status', label:'Status', pill:true},
+    ],
+    fields: [
+      {key:'registrationNo', label:'Registration No', req:true},
+      {key:'rollNo', label:'Roll No', req:true},
+      {key:'name', label:'Full name', req:true, full:true},
+      {key:'gender', label:'Gender', type:'select', options:['Male','Female','Other']},
+      {key:'dateOfBirth', label:'Date of birth', type:'date'},
+      {key:'campusId', label:'Campus', type:'lookup', lookup:'campuses', req:true},
+      {key:'facultyId', label:'Faculty', type:'lookup', lookup:'faculties', req:true},
+      {key:'departmentId', label:'Department', type:'lookup', lookup:'departments', req:true},
+      {key:'programId', label:'Program', type:'lookup', lookup:'programs', req:true},
+      {key:'currentClassId', label:'Class', type:'lookup', lookup:'classes', req:true},
+      {key:'currentSectionId', label:'Section', type:'lookup', lookup:'sections', req:true},
+      {key:'sessionId', label:'Session', type:'lookup', lookup:'sessions', req:true},
+      {key:'semesterId', label:'Semester', type:'lookup', lookup:'semesters'},
+      {key:'admissionDate', label:'Admission date', type:'date'},
+      {key:'status', label:'Status', type:'select', options:['active','inactive','graduated'], default:'active'},
+    ],
+  },
+  parents: {
+    label: 'Parents / Guardians', endpoint: 'parents', idField:'id',
+    filter: {key:'studentId', lookup:'__students', label:'Student'},
+    columns: [
+      {key:'name', label:'Name'},
+      {key:'relationship', label:'Relationship'},
+      {key:'whatsapp', label:'WhatsApp', mono:true},
+      {key:'mobile', label:'Mobile', mono:true},
+      {key:'email', label:'Email'},
+      {key:'active', label:'Active', bool:true},
+    ],
+    fields: [
+      {key:'studentId', label:'Student', type:'lookup', lookup:'__students', req:true, full:true},
+      {key:'name', label:'Full name', req:true},
+      {key:'relationship', label:'Relationship', type:'select', options:['Father','Mother','Guardian']},
+      {key:'whatsapp', label:'WhatsApp number', placeholder:'+92-3xx-xxxxxxx'},
+      {key:'mobile', label:'Mobile number'},
+      {key:'email', label:'Email'},
+      {key:'preferredLanguage', label:'Preferred language', type:'select', options:['en','ur'], default:'en'},
+      {key:'active', label:'Active', type:'select', options:['true','false'], default:'true', bool:true},
+    ],
+  },
+  teachers: {
+    label: 'Teachers', endpoint: 'teachers', search: true, idField:'id',
+    columns: [
+      {key:'employeeCode', label:'Emp. Code', mono:true},
+      {key:'name', label:'Name'},
+      {key:'designation', label:'Designation'},
+      {key:'email', label:'Email'},
+      {key:'status', label:'Status', pill:true},
+    ],
+    fields: [
+      {key:'employeeCode', label:'Employee code', req:true, hint:'Used to map to a 360 employee'},
+      {key:'name', label:'Full name', req:true},
+      {key:'designation', label:'Designation', req:true},
+      {key:'departmentId', label:'Department', type:'lookup', lookup:'departments', req:true},
+      {key:'facultyId', label:'Faculty', type:'lookup', lookup:'faculties', req:true},
+      {key:'mobile', label:'Mobile'},
+      {key:'email', label:'Email'},
+      {key:'status', label:'Status', type:'select', options:['active','inactive'], default:'active'},
+    ],
+  },
+  subjects: {
+    label: 'Subjects', endpoint: 'subjects', search: true, idField:'id',
+    columns: [
+      {key:'code', label:'Code', mono:true},
+      {key:'name', label:'Name'},
+      {key:'creditHours', label:'Credits'},
+      {key:'status', label:'Status', pill:true},
+    ],
+    fields: [
+      {key:'code', label:'Subject code', req:true},
+      {key:'name', label:'Name', req:true},
+      {key:'departmentId', label:'Department', type:'lookup', lookup:'departments', req:true},
+      {key:'programId', label:'Program', type:'lookup', lookup:'programs', req:true},
+      {key:'creditHours', label:'Credit hours', type:'number', default:3},
+      {key:'status', label:'Status', type:'select', options:['active','inactive'], default:'active'},
+    ],
+  },
+  'teaching-assignments': {
+    label: 'Teaching Assignments', endpoint: 'teaching-assignments', idField:'id',
+    columns: [
+      {key:'teacherName', label:'Teacher'},
+      {key:'subjectName', label:'Subject'},
+      {key:'className', label:'Class'},
+      {key:'sectionName', label:'Section'},
+      {key:'status', label:'Status', pill:true},
+    ],
+    fields: [
+      {key:'teacherId', label:'Teacher', type:'lookup', lookup:'teachers', req:true, full:true},
+      {key:'subjectId', label:'Subject', type:'lookup', lookup:'subjects', req:true, full:true},
+      {key:'sessionId', label:'Session', type:'lookup', lookup:'sessions', req:true},
+      {key:'semesterId', label:'Semester', type:'lookup', lookup:'semesters', req:true},
+      {key:'campusId', label:'Campus', type:'lookup', lookup:'campuses', req:true},
+      {key:'programId', label:'Program', type:'lookup', lookup:'programs', req:true},
+      {key:'gradeClassId', label:'Class', type:'lookup', lookup:'classes', req:true},
+      {key:'sectionId', label:'Section', type:'lookup', lookup:'sections', req:true},
+      {key:'startDate', label:'Start date', type:'date'},
+      {key:'endDate', label:'End date', type:'date'},
+      {key:'status', label:'Status', type:'select', options:['active','inactive'], default:'active'},
+    ],
+  },
+  enrollments: {
+    label: 'Student Enrollments', endpoint: 'enrollments', idField:'id',
+    filter: {key:'studentId', lookup:'__students', label:'Student'},
+    columns: [
+      {key:'studentName', label:'Student'},
+      {key:'registrationNo', label:'Reg. No', mono:true},
+      {key:'subjectName', label:'Subject'},
+      {key:'teacherName', label:'Teacher'},
+      {key:'status', label:'Status', pill:true},
+    ],
+    fields: [
+      {key:'studentId', label:'Student', type:'lookup', lookup:'__students', req:true, full:true, createOnly:true},
+      {key:'teachingAssignmentId', label:'Teaching assignment', type:'lookup', lookup:'__tas', req:true, full:true, createOnly:true},
+      {key:'enrollmentDate', label:'Enrollment date', type:'date'},
+      {key:'status', label:'Status', type:'select', options:['active','dropped','completed'], default:'active'},
+    ],
+  },
+};
+const ORDER = ['students','parents','teachers','subjects','teaching-assignments','enrollments','mapping'];
+
+/* ---------------- helpers ---------------- */
+async function api(path, opts){
+  const res = await fetch(API + path, Object.assign({headers:{'Content-Type':'application/json'}}, opts));
+  const json = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(json.message || ('HTTP '+res.status));
+  return json.data !== undefined ? json.data : json;
+}
+function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* Build option label for a lookup record. */
+function optLabel(lk, r){
+  if(lk==='teachers') return (r.employeeCode?('['+r.employeeCode+'] '):'')+r.name;
+  if(lk==='subjects') return (r.code?('['+r.code+'] '):'')+r.name;
+  if(lk==='__students') return (r.registrationNo?('['+r.registrationNo+'] '):'')+r.name;
+  if(lk==='__tas') return r.label;
+  const code = r.code ? '['+r.code+'] ' : '';
+  return code + (r.name||r.id);
+}
+function lookupList(name){
+  if(name==='__students') return (window.__students||[]);
+  if(name==='__tas') return (window.__tas||[]);
+  return LOOKUPS[name]||[];
+}
+
+/* ---------------- tabs ---------------- */
+function renderTabs(){
+  const nav = document.getElementById('tabs');
+  nav.innerHTML = ORDER.map(k=>{
+    const label = k==='mapping' ? 'Teacher → Employee Mapping' : ENTITIES[k].label;
+    return '<button class="'+(k===CURRENT?'active':'')+'" onclick="go(\''+k+'\')">'+esc(label)+'</button>';
+  }).join('');
+}
+function go(k){ CURRENT=k; renderTabs(); if(k==='mapping') renderMapping(); else renderEntity(k); }
+
+/* ---------------- entity list ---------------- */
+let SEARCH='';
+let FILTER='';
+async function renderEntity(k){
+  const cfg = ENTITIES[k];
+  const view = document.getElementById('view');
+  let filterHtml='';
+  if(cfg.filter){
+    const list = lookupList(cfg.filter.lookup);
+    filterHtml = '<select class="search" style="width:240px" onchange="setFilter(this.value)"><option value="">All '+esc(cfg.filter.label)+'s</option>'+
+      list.map(r=>'<option value="'+r.id+'"'+(FILTER===r.id?' selected':'')+'>'+esc(optLabel(cfg.filter.lookup,r))+'</option>').join('')+'</select>';
+  }
+  view.innerHTML =
+    '<div class="toolbar"><h2>'+esc(cfg.label)+'</h2><div class="right">'+
+    (cfg.search?'<input class="search" placeholder="Search…" value="'+esc(SEARCH)+'" oninput="setSearch(this.value)">':'')+
+    filterHtml+
+    '<button class="btn" onclick="openForm(null)">＋ New</button></div></div>'+
+    '<div class="card"><div class="tablewrap" id="tbl"><div class="empty">Loading…</div></div></div>'+
+    '<div class="count" id="cnt" style="margin-top:8px"></div>';
+  loadTable();
+}
+function setSearch(v){ SEARCH=v; clearTimeout(window.__st); window.__st=setTimeout(loadTable,220); }
+function setFilter(v){ FILTER=v; loadTable(); }
+
+async function loadTable(){
+  const cfg = ENTITIES[CURRENT];
+  const tbl = document.getElementById('tbl');
+  let qs=[];
+  if(cfg.search && SEARCH) qs.push('search='+encodeURIComponent(SEARCH));
+  if(cfg.filter && FILTER) qs.push(cfg.filter.key+'='+encodeURIComponent(FILTER));
+  try{
+    const rows = await api('/'+cfg.endpoint+(qs.length?'?'+qs.join('&'):''));
+    if(!rows.length){ tbl.innerHTML='<div class="empty">No records. Click “＋ New” to add one.</div>'; document.getElementById('cnt').textContent='0 records'; return; }
+    const head = cfg.columns.map(c=>'<th>'+esc(c.label)+'</th>').join('')+'<th style="text-align:right">Actions</th>';
+    const body = rows.map(r=>{
+      const tds = cfg.columns.map(c=>{
+        let v = r[c.key];
+        if(c.bool) v = v ? '<span class="pill active">Yes</span>' : '<span class="pill">No</span>';
+        else if(c.pill) v = '<span class="pill '+(String(v)==='active'?'active':'')+'">'+esc(v)+'</span>';
+        else v = '<span'+(c.mono?' class="mono"':'')+'>'+esc(v==null?'—':v)+'</span>';
+        return '<td>'+v+'</td>';
+      }).join('');
+      const rid = r[cfg.idField];
+      return '<tr><td style="display:none"></td>'+tds+
+        '<td style="text-align:right;white-space:nowrap">'+
+        '<button class="btn ghost mini" onclick=\'edit("'+rid+'")\'>Edit</button> '+
+        '<button class="btn danger mini" onclick=\'del("'+rid+'")\'>Delete</button></td></tr>';
+    }).join('');
+    tbl.innerHTML = '<table><thead><tr>'+head+'</tr></thead><tbody>'+body+'</tbody></table>';
+    document.getElementById('cnt').textContent = rows.length+' record'+(rows.length===1?'':'s');
+    window.__rows = rows;
+  }catch(e){ tbl.innerHTML='<div class="empty">Error: '+esc(e.message)+'</div>'; }
+}
+
+/* ---------------- form ---------------- */
+function openForm(record){
+  const cfg = ENTITIES[CURRENT];
+  EDIT = record;
+  document.getElementById('mTitle').textContent = (record?'Edit ':'New ')+cfg.label.replace(/s$/,'');
+  const err = document.getElementById('mErr'); err.style.display='none';
+  const form = document.getElementById('mForm');
+  form.innerHTML = cfg.fields.map(f=>{
+    if(record && f.createOnly) return ''; // e.g. can't move an enrollment's student
+    let val = record ? record[f.key] : (f.default!==undefined?f.default:'');
+    if(f.bool && record) val = String(record[f.key]);
+    let input;
+    if(f.type==='lookup'){
+      const list = lookupList(f.lookup);
+      input = '<select id="fld_'+f.key+'"><option value="">— select —</option>'+
+        list.map(r=>'<option value="'+r.id+'"'+(String(val)===String(r.id)?' selected':'')+'>'+esc(optLabel(f.lookup,r))+'</option>').join('')+'</select>';
+    } else if(f.type==='select'){
+      input = '<select id="fld_'+f.key+'">'+f.options.map(o=>'<option value="'+esc(o)+'"'+(String(val)===String(o)?' selected':'')+'>'+esc(o)+'</option>').join('')+'</select>';
+    } else if(f.type==='date'){
+      const dv = val ? String(val).slice(0,10) : '';
+      input = '<input type="date" id="fld_'+f.key+'" value="'+esc(dv)+'">';
+    } else if(f.type==='number'){
+      input = '<input type="number" id="fld_'+f.key+'" value="'+esc(val)+'">';
+    } else {
+      input = '<input id="fld_'+f.key+'" value="'+esc(val)+'"'+(f.placeholder?' placeholder="'+esc(f.placeholder)+'"':'')+'>';
+    }
+    return '<div class="field'+(f.full?' full':'')+'"><label>'+esc(f.label)+(f.req?' <span class="req">*</span>':'')+'</label>'+input+
+      (f.hint?'<span class="count">'+esc(f.hint)+'</span>':'')+'</div>';
+  }).join('');
+  document.getElementById('overlay').classList.add('open');
+}
+function closeForm(){ document.getElementById('overlay').classList.remove('open'); EDIT=null; }
+function edit(id){ const r=(window.__rows||[]).find(x=>String(x[ENTITIES[CURRENT].idField])===String(id)); if(r) openForm(r); }
+
+async function saveForm(){
+  const cfg = ENTITIES[CURRENT];
+  const body = {};
+  for(const f of cfg.fields){
+    if(EDIT && f.createOnly) continue;
+    const el = document.getElementById('fld_'+f.key);
+    if(!el) continue;
+    let v = el.value;
+    if(v==='' ) { if(f.req){ return showErr('“'+f.label+'” is required.'); } v = undefined; }
+    if(f.type==='number' && v!==undefined) v = Number(v);
+    if(f.bool && v!==undefined) v = (v==='true');
+    body[f.key] = v;
+  }
+  const btn=document.getElementById('mSave'); btn.disabled=true; btn.textContent='Saving…';
+  try{
+    const idf = cfg.idField;
+    if(EDIT) await api('/'+cfg.endpoint+'/'+EDIT[idf], {method:'PUT', body:JSON.stringify(body)});
+    else await api('/'+cfg.endpoint, {method:'POST', body:JSON.stringify(body)});
+    closeForm(); toast('Saved.'); await refreshDynamicLookups(); loadTable();
+  }catch(e){ showErr(e.message); }
+  finally{ btn.disabled=false; btn.textContent='Save'; }
+}
+function showErr(m){ const e=document.getElementById('mErr'); e.textContent=m; e.style.display='block'; }
+
+async function del(id){
+  const cfg = ENTITIES[CURRENT];
+  if(!confirm('Delete this record? This cannot be undone.')) return;
+  try{ await api('/'+cfg.endpoint+'/'+id, {method:'DELETE'}); toast('Deleted.'); await refreshDynamicLookups(); loadTable(); }
+  catch(e){ alert(e.message); }
+}
+
+/* ---------------- mapping info tab ---------------- */
+function renderMapping(){
+  const teachers = lookupList('teachers');
+  document.getElementById('view').innerHTML =
+    '<div class="toolbar"><h2>Teacher → Employee Mapping</h2></div>'+
+    '<div class="info">'+
+    '<p><strong>Where this happens:</strong> the mapping lives in the <strong>360 Feedback System</strong>, because that is where employee records and authentication live. '+
+    'Each SIS teacher is linked to exactly one 360 employee by <strong>employee code</strong> (a stable identifier) — never by name. '+
+    'When a parent submits feedback for a teacher, the system resolves the teacher to the mapped employee and records the feedback against that employee’s 360 cycle.</p>'+
+    '<div class="step"><div class="n">1</div><div>Open the 360 app at <code>http://localhost:5173</code> and sign in as an administrator.</div></div>'+
+    '<div class="step"><div class="n">2</div><div>Go to <strong>Parent Evaluations → Teacher Mapping</strong>.</div></div>'+
+    '<div class="step"><div class="n">3</div><div>For each SIS teacher, pick the matching 360 employee (a code match is suggested automatically) and click <strong>Save</strong>. Each employee can be mapped to only one teacher.</div></div>'+
+    '<p style="margin-top:14px">Use the reference list below to match employee codes. Teachers you add here appear there automatically.</p>'+
+    '</div>'+
+    '<div class="card" style="margin-top:14px"><div class="tablewrap"><table><thead><tr><th>Teacher</th><th>Employee code</th><th>Designation</th></tr></thead><tbody>'+
+    teachers.map(t=>'<tr><td>'+esc(t.name)+'</td><td class="mono">'+esc(t.employeeCode||'—')+'</td><td>'+esc(t.designation||'')+'</td></tr>').join('')+
+    '</tbody></table></div></div>';
+}
+
+/* ---------------- bootstrap ---------------- */
+async function refreshDynamicLookups(){
+  // students + teaching assignments are used as FK pickers but can change, so refresh.
+  try{
+    const [students, tas] = await Promise.all([ api('/students'), api('/teaching-assignments') ]);
+    window.__students = students;
+    window.__tas = tas.map(t=>({ id:t.id, label:(t.teacherName||'?')+' · '+(t.subjectName||'?')+(t.sectionName?(' · '+t.sectionName):'') }));
+  }catch(e){}
+}
+async function boot(){
+  renderTabs();
+  try{
+    LOOKUPS = await api('/lookups');
+    await refreshDynamicLookups();
+    document.getElementById('dbline').textContent =
+      (LOOKUPS.teachers?.length||0)+' teachers · '+(LOOKUPS.subjects?.length||0)+' subjects · '+(window.__students?.length||0)+' students';
+  }catch(e){ document.getElementById('view').innerHTML='<div class="info">Could not reach the SIS admin API: '+esc(e.message)+'</div>'; return; }
+  go('students');
+}
+boot();
+</script>
+</body>
+</html>

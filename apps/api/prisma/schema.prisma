@@ -1,0 +1,1488 @@
+// Canonical Prisma schema — Enterprise 360 (clean build, single source of truth).
+// snake_case DB via @map/@@map; UUID PKs; soft delete; audit columns; composite
+// tenant-scoped indexes. Grows one module per increment; kept 1:1 with
+// database/000_initial_schema.sql.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===========================================================================
+// FOUNDATION — tenancy, identity, RBAC, audit
+// ===========================================================================
+
+enum OrgType {
+  root
+  campus
+
+  @@map("org_type")
+}
+
+model Organization {
+  id          String    @id @default(uuid()) @db.Uuid
+  parentOrgId String?   @map("parent_org_id") @db.Uuid
+  name        String    @db.VarChar(200)
+  slug        String    @unique @db.VarChar(120)
+  orgType     OrgType   @default(root) @map("org_type")
+  status      String    @default("active") @db.VarChar(20)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  parentOrg Organization?  @relation("OrgHierarchy", fields: [parentOrgId], references: [id])
+  children  Organization[] @relation("OrgHierarchy")
+
+  users                         User[]
+  roles                         Role[]
+  configurations                Configuration[]
+  featureFlags                  FeatureFlag[]
+  systemSettings                SystemSetting[]
+  ratingScales                  RatingScale[]
+  departments                   Department[]
+  designations                  Designation[]
+  competencyCategories          CompetencyCategory[]
+  competencies                  Competency[]
+  competencyVersions            CompetencyVersion[]
+  competencyDesignationMappings CompetencyDesignationMapping[]
+  refreshTokens                 RefreshToken[]
+  loginAttempts                 LoginAttempt[]
+  employees                     Employee[]
+  notifications                 Notification[]
+  otpCodes                      OtpCode[]
+  communicationCampaigns        CommunicationCampaign[]
+  shortLinks                    ShortLink[]
+  questions                     Question[]
+  questionnaireTemplates        QuestionnaireTemplate[]
+  rubrics                       Rubric[]
+  workflowDefinitions           WorkflowDefinition[]
+  workflowInstances             WorkflowInstance[]
+  appraisalCycles               AppraisalCycle[]
+
+  @@index([parentOrgId])
+  @@map("organizations")
+}
+
+model User {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  email          String    @db.VarChar(255)
+  passwordHash   String?   @map("password_hash") @db.VarChar(255)
+  fullName       String?   @map("full_name") @db.VarChar(200)
+  status         String    @default("active") @db.VarChar(20)
+  // When true the user must set a new password before using the app (set by an
+  // admin password reset or a temporary-password onboarding).
+  mustChangePassword Boolean @default(false) @map("must_change_password")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization    Organization      @relation(fields: [organizationId], references: [id])
+  userRoles       UserRole[]
+  refreshTokens   RefreshToken[]
+  mfaSecret       MfaSecret?
+  trustedDevices  TrustedDevice[]
+  passwordHistory PasswordHistory[]
+  passwordResetTokens PasswordResetToken[]
+  employee        Employee?
+
+  @@unique([organizationId, email], name: "user_org_email", map: "uq_users_org_email")
+  @@index([organizationId])
+  @@map("users")
+}
+
+// Self-service forgot-password tokens. Only a SHA-256 hash of the token is stored;
+// the raw token travels only in the emailed reset link. Single-use + expiry.
+model PasswordResetToken {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  tokenHash      String    @unique @map("token_hash") @db.VarChar(64)
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt         DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+model Role {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String    @db.VarChar(120)
+  description    String?
+  isSystem       Boolean   @default(false) @map("is_system")
+  // RBAC data scope: 'organization' (all) | 'reporting' (self + reporting hierarchy) | 'own' (self only).
+  scope          String    @default("organization") @db.VarChar(20)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization    Organization     @relation(fields: [organizationId], references: [id])
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@unique([organizationId, name], name: "role_org_name", map: "uq_roles_org_name")
+  @@index([organizationId])
+  @@map("roles")
+}
+
+model Permission {
+  code        String  @id @db.VarChar(100)
+  module      String  @db.VarChar(60)
+  description String
+
+  rolePermissions RolePermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+model RolePermission {
+  id             String @id @default(uuid()) @db.Uuid
+  roleId         String @map("role_id") @db.Uuid
+  permissionCode String @map("permission_code") @db.VarChar(100)
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionCode], references: [code], onDelete: Cascade)
+
+  @@unique([roleId, permissionCode], name: "role_permission", map: "uq_role_permission")
+  @@index([permissionCode])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  roleId String @map("role_id") @db.Uuid
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId], name: "user_role", map: "uq_user_role")
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+model AuditLog {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  action         String   @db.VarChar(120)
+  entityType     String   @map("entity_type") @db.VarChar(80)
+  entityId       String   @map("entity_id") @db.Uuid
+  previousValue  Json?    @map("previous_value")
+  newValue       Json?    @map("new_value")
+  reason         String?
+  ip             String?  @db.VarChar(60)
+  device         String?
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([organizationId, entityType])
+  @@index([organizationId, userId])
+  @@map("audit_logs")
+}
+
+// ===========================================================================
+// CONFIGURATION
+// ===========================================================================
+
+model Configuration {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  module         String    @db.VarChar(60)
+  key            String    @db.VarChar(120)
+  value          Json
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, module, key], name: "configuration_scope", map: "uq_configuration_scope")
+  @@index([organizationId, module])
+  @@map("configurations")
+}
+
+model FeatureFlag {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  key            String   @db.VarChar(120)
+  isEnabled      Boolean  @default(false) @map("is_enabled")
+  description    String?
+  createdBy      String?  @map("created_by") @db.Uuid
+  updatedBy      String?  @map("updated_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, key], name: "feature_flag_scope", map: "uq_feature_flag_scope")
+  @@index([organizationId])
+  @@map("feature_flags")
+}
+
+model SystemSetting {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  key            String   @db.VarChar(120)
+  value          Json
+  createdBy      String?  @map("created_by") @db.Uuid
+  updatedBy      String?  @map("updated_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, key], name: "system_setting_scope", map: "uq_system_setting_scope")
+  @@index([organizationId])
+  @@map("system_settings")
+}
+
+model RatingScale {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String    @db.VarChar(120)
+  scaleType      String    @map("scale_type") @db.VarChar(20)
+  minValue       Decimal   @map("min_value") @db.Decimal(6, 2)
+  maxValue       Decimal   @map("max_value") @db.Decimal(6, 2)
+  status         String    @default("active") @db.VarChar(20)
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization       @relation(fields: [organizationId], references: [id])
+  levels       RatingScaleLevel[]
+  questions    Question[]
+  rubrics      Rubric[]
+
+  @@index([organizationId])
+  @@map("rating_scales")
+}
+
+model RatingScaleLevel {
+  id            String  @id @default(uuid()) @db.Uuid
+  ratingScaleId String  @map("rating_scale_id") @db.Uuid
+  value         Decimal @db.Decimal(6, 2)
+  label         String  @db.VarChar(60)
+  color         String? @db.VarChar(20)
+  icon          String? @db.VarChar(50)
+  sortOrder     Int     @default(0) @map("sort_order")
+
+  ratingScale RatingScale @relation(fields: [ratingScaleId], references: [id], onDelete: Cascade)
+
+  @@unique([ratingScaleId, value], name: "rating_scale_value", map: "uq_rating_scale_value")
+  @@index([ratingScaleId])
+  @@map("rating_scale_levels")
+}
+
+// ===========================================================================
+// ORGANIZATION (tables now; module behavior in its increment)
+// ===========================================================================
+
+model Department {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  parentId       String?   @map("parent_id") @db.Uuid
+  campusId       String?   @map("campus_id") @db.Uuid
+  name           String    @db.VarChar(200)
+  unitType       String    @default("department") @map("unit_type") @db.VarChar(40)
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  parent       Department?  @relation("DeptHierarchy", fields: [parentId], references: [id])
+  children     Department[] @relation("DeptHierarchy")
+  employees    Employee[]
+
+  @@index([organizationId])
+  @@index([parentId])
+  @@map("departments")
+}
+
+model Designation {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String    @db.VarChar(200)
+  level          Int       @default(0)
+  promotionToId  String?   @map("promotion_to_id") @db.Uuid
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  promotionTo  Designation? @relation("PromotionPath", fields: [promotionToId], references: [id])
+  promotedFrom Designation[] @relation("PromotionPath")
+  competencyMappings CompetencyDesignationMapping[]
+  employees    Employee[]
+
+  @@index([organizationId])
+  @@map("designations")
+}
+
+// ===========================================================================
+// COMPETENCY (my design)
+// ===========================================================================
+
+enum CompetencyVersionStatus {
+  draft
+  active
+  retired
+
+  @@map("competency_version_status")
+}
+
+enum BehaviourIndicatorType {
+  positive
+  negative
+
+  @@map("behaviour_indicator_type")
+}
+
+model CompetencyCategory {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String    @db.VarChar(150)
+  description    String?
+  colorTone      String?   @map("color_tone") @db.VarChar(30)
+  isActive       Boolean   @default(true) @map("is_active")
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  competencies Competency[]
+
+  @@index([organizationId])
+  @@map("competency_categories")
+}
+
+model Competency {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  categoryId     String    @map("category_id") @db.Uuid
+  name           String    @db.VarChar(200)
+  description    String?
+  isArchived     Boolean   @default(false) @map("is_archived")
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization                   @relation(fields: [organizationId], references: [id])
+  category     CompetencyCategory             @relation(fields: [categoryId], references: [id])
+  versions     CompetencyVersion[]
+  mappings     CompetencyDesignationMapping[]
+  questions    Question[]
+  rubrics      Rubric[]
+
+  @@index([organizationId])
+  @@index([categoryId])
+  @@map("competencies")
+}
+
+model CompetencyVersion {
+  id             String                  @id @default(uuid()) @db.Uuid
+  organizationId String                  @map("organization_id") @db.Uuid
+  competencyId   String                  @map("competency_id") @db.Uuid
+  versionLabel   String                  @map("version_label") @db.VarChar(20)
+  status         CompetencyVersionStatus @default(draft)
+  createdBy      String?                 @map("created_by") @db.Uuid
+  updatedBy      String?                 @map("updated_by") @db.Uuid
+  createdAt      DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime                @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime?               @map("deleted_at") @db.Timestamptz(6)
+
+  organization      Organization         @relation(fields: [organizationId], references: [id])
+  competency        Competency           @relation(fields: [competencyId], references: [id], onDelete: Cascade)
+  proficiencyLevels ProficiencyLevel[]
+  indicators        BehaviourIndicator[]
+
+  @@unique([competencyId, versionLabel], name: "competency_version_label", map: "uq_competency_versions_comp_label")
+  @@index([organizationId])
+  @@index([competencyId])
+  @@map("competency_versions")
+}
+
+model ProficiencyLevel {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  versionId      String   @map("version_id") @db.Uuid
+  level          Int      @db.SmallInt
+  name           String   @db.VarChar(80)
+  description    String?
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  version    CompetencyVersion    @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  indicators BehaviourIndicator[]
+
+  @@unique([versionId, level], name: "proficiency_version_level", map: "uq_proficiency_levels_version_level")
+  @@index([versionId])
+  @@map("proficiency_levels")
+}
+
+model BehaviourIndicator {
+  id                 String                 @id @default(uuid()) @db.Uuid
+  organizationId     String                 @map("organization_id") @db.Uuid
+  versionId          String                 @map("version_id") @db.Uuid
+  proficiencyLevelId String?                @map("proficiency_level_id") @db.Uuid
+  type               BehaviourIndicatorType
+  text               String
+  sortOrder          Int                    @default(0) @map("sort_order")
+  createdBy          String?                @map("created_by") @db.Uuid
+  updatedBy          String?                @map("updated_by") @db.Uuid
+  createdAt          DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt          DateTime?              @map("deleted_at") @db.Timestamptz(6)
+
+  version          CompetencyVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  proficiencyLevel ProficiencyLevel? @relation(fields: [proficiencyLevelId], references: [id])
+
+  @@index([organizationId])
+  @@index([versionId])
+  @@index([proficiencyLevelId])
+  @@map("behaviour_indicators")
+}
+
+model CompetencyDesignationMapping {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  competencyId   String    @map("competency_id") @db.Uuid
+  designationId  String    @map("designation_id") @db.Uuid
+  weight         Decimal   @default(0) @db.Decimal(6, 2)
+  isMandatory    Boolean   @default(false) @map("is_mandatory")
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  competency   Competency   @relation(fields: [competencyId], references: [id], onDelete: Cascade)
+  designation  Designation  @relation(fields: [designationId], references: [id], onDelete: Cascade)
+
+  @@unique([competencyId, designationId], name: "competency_designation", map: "uq_comp_desig_mapping")
+  @@index([organizationId])
+  @@index([designationId])
+  @@map("competency_designation_mappings")
+}
+
+// ===========================================================================
+// AUTHENTICATION
+// ===========================================================================
+
+model RefreshToken {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  tokenHash      String    @unique @map("token_hash") @db.VarChar(128)
+  // Rotation chain: this row replaces `replacedTokenId`; reuse of a replaced
+  // token triggers revocation of the whole chain.
+  replacedTokenId String?  @map("replaced_token_id") @db.Uuid
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)
+  revokedAt      DateTime? @map("revoked_at") @db.Timestamptz(6)
+  ip             String?   @db.VarChar(60)
+  userAgent      String?   @map("user_agent")
+  deviceHash     String?   @map("device_hash") @db.VarChar(128)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model MfaSecret {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @unique @map("user_id") @db.Uuid
+  encryptedSecret String    @map("encrypted_secret")
+  enabled         Boolean   @default(false)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  backupCodes MfaBackupCode[]
+
+  @@map("mfa_secrets")
+}
+
+model MfaBackupCode {
+  id          String    @id @default(uuid()) @db.Uuid
+  mfaSecretId String    @map("mfa_secret_id") @db.Uuid
+  codeHash    String    @map("code_hash") @db.VarChar(128)
+  usedAt      DateTime? @map("used_at") @db.Timestamptz(6)
+
+  mfaSecret MfaSecret @relation(fields: [mfaSecretId], references: [id], onDelete: Cascade)
+
+  @@index([mfaSecretId])
+  @@map("mfa_backup_codes")
+}
+
+model TrustedDevice {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  deviceHash String   @map("device_hash") @db.VarChar(128)
+  label      String?  @db.VarChar(120)
+  lastSeenAt DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceHash], name: "trusted_device", map: "uq_trusted_device")
+  @@map("trusted_devices")
+}
+
+model LoginAttempt {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  email          String   @db.VarChar(255)
+  success        Boolean
+  reason         String?  @db.VarChar(120)
+  ip             String?  @db.VarChar(60)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, email, createdAt])
+  @@map("login_attempts")
+}
+
+model PasswordHistory {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_history")
+}
+
+// ===========================================================================
+// ORGANIZATION — employees, managers
+// ===========================================================================
+
+model Employee {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  userId         String    @unique @map("user_id") @db.Uuid
+  employeeCode   String    @map("employee_code") @db.VarChar(60)
+  departmentId   String?   @map("department_id") @db.Uuid
+  designationId  String?   @map("designation_id") @db.Uuid
+  campusId       String?   @map("campus_id") @db.Uuid
+  lineManagerId  String?   @map("line_manager_id") @db.Uuid
+  joinDate       DateTime? @map("join_date") @db.Date
+  status         String    @default("active") @db.VarChar(20)
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [organizationId], references: [id])
+  user         User          @relation(fields: [userId], references: [id])
+  department   Department?   @relation(fields: [departmentId], references: [id])
+  designation  Designation?  @relation(fields: [designationId], references: [id])
+  lineManager  Employee?     @relation("LineManagement", fields: [lineManagerId], references: [id])
+  reports      Employee[]    @relation("LineManagement")
+  matrixOf     EmployeeMatrixManager[] @relation("MatrixEmployee")
+  matrixFor    EmployeeMatrixManager[] @relation("MatrixManager")
+  appraisalParticipations AppraisalParticipant[]
+  reviewerAssignments     ReviewerAssignment[]
+  developmentActions      DevelopmentAction[]
+  externalIdentityMaps    ExternalIdentityMap[]
+
+  @@unique([organizationId, employeeCode], name: "employee_org_code", map: "uq_employees_org_code")
+  @@index([organizationId])
+  @@index([departmentId])
+  @@index([designationId])
+  @@index([lineManagerId])
+  @@map("employees")
+}
+
+model EmployeeMatrixManager {
+  id         String @id @default(uuid()) @db.Uuid
+  employeeId String @map("employee_id") @db.Uuid
+  managerId  String @map("manager_id") @db.Uuid
+
+  employee Employee @relation("MatrixEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+  manager  Employee @relation("MatrixManager", fields: [managerId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, managerId], name: "matrix_pair", map: "uq_employee_matrix")
+  @@index([managerId])
+  @@map("employee_matrix_managers")
+}
+
+// ===========================================================================
+// COMMUNICATION GATEWAY
+// ===========================================================================
+
+enum CommunicationChannel {
+  email
+  sms
+  whatsapp
+
+  @@map("communication_channel")
+}
+
+model CommunicationCampaign {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String    @db.VarChar(200)
+  channel        CommunicationChannel
+  templateKey    String?   @map("template_key") @db.VarChar(120)
+  subject        String?   @db.VarChar(255)
+  body           String
+  audience       Json
+  status         String    @default("draft") @db.VarChar(20)
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization  Organization   @relation(fields: [organizationId], references: [id])
+  notifications Notification[]
+
+  @@index([organizationId])
+  @@map("communication_campaigns")
+}
+
+model Notification {
+  id                String    @id @default(uuid()) @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  campaignId        String?   @map("campaign_id") @db.Uuid
+  channel           CommunicationChannel
+  recipient         String    @db.VarChar(255)
+  subject           String?   @db.VarChar(255)
+  body              String
+  templateKey       String?   @map("template_key") @db.VarChar(120)
+  status            String    @default("queued") @db.VarChar(20)
+  provider          String?   @db.VarChar(60)
+  providerMessageId String?   @map("provider_message_id") @db.VarChar(200)
+  error             String?
+  sentAt            DateTime? @map("sent_at") @db.Timestamptz(6)
+  createdBy         String?   @map("created_by") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization           @relation(fields: [organizationId], references: [id])
+  campaign     CommunicationCampaign? @relation(fields: [campaignId], references: [id])
+
+  @@index([organizationId, status])
+  @@index([campaignId])
+  @@index([providerMessageId])
+  @@map("notifications")
+}
+
+model OtpCode {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  identifier     String    @db.VarChar(255)
+  channel        CommunicationChannel
+  codeHash       String    @map("code_hash") @db.VarChar(128)
+  purpose        String    @db.VarChar(60)
+  attempts       Int       @default(0)
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt     DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, identifier, purpose])
+  @@map("otp_codes")
+}
+
+model ShortLink {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  code           String   @unique @db.VarChar(20)
+  targetUrl      String   @map("target_url")
+  clicks         Int      @default(0)
+  createdBy      String?  @map("created_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@map("short_links")
+}
+
+// ===========================================================================
+// QUESTIONNAIRE
+// ===========================================================================
+
+enum QuestionType {
+  rating
+  yes_no
+  multiple_choice
+  text
+  numeric
+
+  @@map("question_type")
+}
+
+model Question {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  competencyId   String?      @map("competency_id") @db.Uuid
+  ratingScaleId  String?      @map("rating_scale_id") @db.Uuid
+  category       String?      @db.VarChar(120)
+  text           String
+  type           QuestionType
+  isMandatory    Boolean      @default(true) @map("is_mandatory")
+  weight         Decimal      @default(1) @db.Decimal(6, 2)
+  options        Json?
+  language       String       @default("en") @db.VarChar(10)
+  status         String       @default("active") @db.VarChar(20)
+  createdBy      String?      @map("created_by") @db.Uuid
+  updatedBy      String?      @map("updated_by") @db.Uuid
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime?    @map("deleted_at") @db.Timestamptz(6)
+
+  organization     Organization      @relation(fields: [organizationId], references: [id])
+  competency       Competency?       @relation(fields: [competencyId], references: [id])
+  ratingScale      RatingScale?      @relation(fields: [ratingScaleId], references: [id])
+  sectionQuestions SectionQuestion[]
+
+  @@index([organizationId])
+  @@index([competencyId])
+  @@map("questions")
+}
+
+model QuestionnaireTemplate {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String    @db.VarChar(200)
+  description    String?
+  status         String    @default("draft") @db.VarChar(20)
+  version        Int       @default(1)
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization      @relation(fields: [organizationId], references: [id])
+  sections     TemplateSection[]
+  feedbackSources FeedbackSource[]
+
+  @@index([organizationId])
+  @@map("questionnaire_templates")
+}
+
+model TemplateSection {
+  id          String  @id @default(uuid()) @db.Uuid
+  templateId  String  @map("template_id") @db.Uuid
+  title       String  @db.VarChar(200)
+  description String?
+  sortOrder   Int     @default(0) @map("sort_order")
+
+  template  QuestionnaireTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  questions SectionQuestion[]
+
+  @@index([templateId])
+  @@map("template_sections")
+}
+
+model SectionQuestion {
+  id                  String   @id @default(uuid()) @db.Uuid
+  sectionId           String   @map("section_id") @db.Uuid
+  questionId          String   @map("question_id") @db.Uuid
+  sortOrder           Int      @default(0) @map("sort_order")
+  weightOverride      Decimal? @map("weight_override") @db.Decimal(6, 2)
+  isMandatoryOverride Boolean? @map("is_mandatory_override")
+  condition           Json?
+
+  section  TemplateSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  question Question        @relation(fields: [questionId], references: [id])
+
+  @@unique([sectionId, questionId], name: "section_question", map: "uq_section_question")
+  @@index([questionId])
+  @@map("section_questions")
+}
+
+model Rubric {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  competencyId   String?   @map("competency_id") @db.Uuid
+  ratingScaleId  String?   @map("rating_scale_id") @db.Uuid
+  title          String    @db.VarChar(200)
+  descriptors    Json
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedBy      String?   @map("updated_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  competency   Competency?  @relation(fields: [competencyId], references: [id])
+  ratingScale  RatingScale? @relation(fields: [ratingScaleId], references: [id])
+
+  @@index([organizationId])
+  @@map("rubrics")
+}
+
+// ===========================================================================
+// WORKFLOW ENGINE (generic, polymorphic entity_type/entity_id)
+// ===========================================================================
+
+enum WorkflowMode {
+  sequential
+  parallel
+
+  @@map("workflow_mode")
+}
+
+enum WorkflowStatus {
+  pending
+  in_progress
+  approved
+  rejected
+  cancelled
+
+  @@map("workflow_status")
+}
+
+enum WorkflowTaskStatus {
+  pending
+  approved
+  rejected
+  delegated
+  skipped
+
+  @@map("workflow_task_status")
+}
+
+model WorkflowDefinition {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  name           String       @db.VarChar(200)
+  entityType     String       @map("entity_type") @db.VarChar(80)
+  mode           WorkflowMode @default(sequential)
+  isActive       Boolean      @default(true) @map("is_active")
+  createdBy      String?      @map("created_by") @db.Uuid
+  updatedBy      String?      @map("updated_by") @db.Uuid
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime?    @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization       @relation(fields: [organizationId], references: [id])
+  steps        WorkflowStep[]
+  instances    WorkflowInstance[]
+
+  @@index([organizationId, entityType])
+  @@map("workflow_definitions")
+}
+
+model WorkflowStep {
+  id            String  @id @default(uuid()) @db.Uuid
+  definitionId  String  @map("definition_id") @db.Uuid
+  name          String  @db.VarChar(200)
+  stepOrder     Int     @map("step_order")
+  assigneeType  String  @map("assignee_type") @db.VarChar(20) // role | user
+  assigneeValue String? @map("assignee_value") @db.Uuid       // role id or user id
+  slaHours      Int?    @map("sla_hours")
+  condition     Json?
+
+  definition WorkflowDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  tasks      WorkflowTask[]
+
+  @@unique([definitionId, stepOrder], name: "definition_step_order", map: "uq_workflow_step_order")
+  @@index([definitionId])
+  @@map("workflow_steps")
+}
+
+model WorkflowInstance {
+  id             String         @id @default(uuid()) @db.Uuid
+  organizationId String         @map("organization_id") @db.Uuid
+  definitionId   String         @map("definition_id") @db.Uuid
+  entityType     String         @map("entity_type") @db.VarChar(80)
+  entityId       String         @map("entity_id") @db.Uuid
+  status         WorkflowStatus @default(pending)
+  currentOrder   Int            @default(1) @map("current_order")
+  startedBy      String?        @map("started_by") @db.Uuid
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt    DateTime?      @map("completed_at") @db.Timestamptz(6)
+
+  organization Organization       @relation(fields: [organizationId], references: [id])
+  definition   WorkflowDefinition @relation(fields: [definitionId], references: [id])
+  tasks        WorkflowTask[]
+
+  @@index([organizationId, entityType, entityId])
+  @@index([definitionId])
+  @@map("workflow_instances")
+}
+
+model WorkflowTask {
+  id                String             @id @default(uuid()) @db.Uuid
+  instanceId        String             @map("instance_id") @db.Uuid
+  stepId            String             @map("step_id") @db.Uuid
+  stepOrder         Int                @map("step_order")
+  assigneeUserId    String             @map("assignee_user_id") @db.Uuid
+  status            WorkflowTaskStatus @default(pending)
+  comment           String?
+  delegatedToUserId String?            @map("delegated_to_user_id") @db.Uuid
+  decidedAt         DateTime?          @map("decided_at") @db.Timestamptz(6)
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  instance WorkflowInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  step     WorkflowStep     @relation(fields: [stepId], references: [id])
+
+  @@index([instanceId])
+  @@index([assigneeUserId, status])
+  @@map("workflow_tasks")
+}
+
+// ===========================================================================
+// APPRAISAL
+// ===========================================================================
+
+model AppraisalCycle {
+  id                 String    @id @default(uuid()) @db.Uuid
+  organizationId     String    @map("organization_id") @db.Uuid
+  name               String    @db.VarChar(200)
+  startDate          DateTime  @map("start_date") @db.Date
+  endDate            DateTime  @map("end_date") @db.Date
+  submissionDeadline DateTime? @map("submission_deadline") @db.Date
+  status             String    @default("draft") @db.VarChar(20)
+  templateId         String?   @map("template_id") @db.Uuid
+  ratingScaleId      String?   @map("rating_scale_id") @db.Uuid
+  createdBy          String?   @map("created_by") @db.Uuid
+  updatedBy          String?   @map("updated_by") @db.Uuid
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt          DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization           @relation(fields: [organizationId], references: [id])
+  sources      FeedbackSource[]
+  participants AppraisalParticipant[]
+
+  @@index([organizationId])
+  @@map("appraisal_cycles")
+}
+
+model FeedbackSource {
+  id            String  @id @default(uuid()) @db.Uuid
+  cycleId       String  @map("cycle_id") @db.Uuid
+  code          String  @db.VarChar(40)
+  label         String  @db.VarChar(120)
+  weight        Decimal @default(1) @db.Decimal(6, 2)
+  requiredCount Int     @default(1) @map("required_count")
+  isAnonymous   Boolean @default(false) @map("is_anonymous")
+  /// Optional quadrant-specific questionnaire. NULL = use the cycle's template
+  /// (the behaviour of every cycle created before this column existed).
+  templateId    String? @map("template_id") @db.Uuid
+  /// How the Parents quadrant collects feedback. NULL = the original one-form-per-teacher
+  /// behaviour, which is what every cycle created before this column existed does.
+  /// 'consolidated' = one form per student listing all of that student's teachers.
+  /// Meaningful only on a source whose code is 'parent'; ignored elsewhere.
+  parentMode       String? @map("parent_mode") @db.VarChar(24)
+  /// Consolidated mode only: refuse a submission that leaves a listed teacher unrated.
+  /// Off by default — an unrated teacher is treated as "not asked", never as a low score.
+  parentRequireAll Boolean @default(false) @map("parent_require_all")
+  isActive      Boolean @default(true) @map("is_active")
+
+  cycle       AppraisalCycle       @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  template    QuestionnaireTemplate? @relation(fields: [templateId], references: [id])
+  assignments ReviewerAssignment[]
+
+  @@unique([cycleId, code], name: "cycle_source_code", map: "uq_feedback_source_code")
+  @@index([cycleId])
+  @@map("feedback_sources")
+}
+
+model AppraisalParticipant {
+  id         String    @id @default(uuid()) @db.Uuid
+  cycleId    String    @map("cycle_id") @db.Uuid
+  employeeId String    @map("employee_id") @db.Uuid
+  status     String    @default("pending") @db.VarChar(20)
+  finalScore Decimal?  @map("final_score") @db.Decimal(6, 2)
+  potentialRating Decimal? @map("potential_rating") @db.Decimal(6, 2)
+  visibility String    @default("draft") @db.VarChar(20)
+  releasedAt DateTime? @map("released_at") @db.Timestamptz(6)
+  releasedBy String?   @map("released_by") @db.Uuid
+  /// Set when HR calibrates/overrides the final score. While set, automatic
+  /// recomputation must not overwrite finalScore (F-C6).
+  calibratedAt DateTime? @map("calibrated_at") @db.Timestamptz(6)
+  /// Last automatically computed score, retained for transparency after an override.
+  computedScore Decimal? @map("computed_score") @db.Decimal(6, 2)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  cycle       AppraisalCycle       @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  employee    Employee             @relation(fields: [employeeId], references: [id])
+  assignments ReviewerAssignment[]
+
+  @@unique([cycleId, employeeId], name: "cycle_participant", map: "uq_appraisal_participant")
+  @@index([cycleId])
+  @@map("appraisal_participants")
+}
+
+model ReviewerAssignment {
+  id                 String    @id @default(uuid()) @db.Uuid
+  organizationId     String    @map("organization_id") @db.Uuid
+  cycleId            String    @map("cycle_id") @db.Uuid
+  participantId      String    @map("participant_id") @db.Uuid
+  sourceId           String    @map("source_id") @db.Uuid
+  // Internal reviewers reference an employee; external reviewers (parents,
+  // students, …) leave this null and carry an external reference/name instead.
+  reviewerEmployeeId String?   @map("reviewer_employee_id") @db.Uuid
+  reviewerType       String    @default("internal") @map("reviewer_type") @db.VarChar(20)
+  externalRef        String?   @map("external_ref") @db.VarChar(64)
+  externalName       String?   @map("external_name") @db.VarChar(200)
+  status             String    @default("pending") @db.VarChar(20)
+  nominationStatus   String    @default("approved") @map("nomination_status") @db.VarChar(20)
+  submittedAt        DateTime? @map("submitted_at") @db.Timestamptz(6)
+  lastRemindedAt     DateTime? @map("last_reminded_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  participant AppraisalParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  source      FeedbackSource       @relation(fields: [sourceId], references: [id])
+  reviewer    Employee?            @relation(fields: [reviewerEmployeeId], references: [id])
+  responses   FeedbackResponse[]
+
+  @@unique([participantId, sourceId, reviewerEmployeeId], name: "assignment_unique", map: "uq_reviewer_assignment")
+  @@index([organizationId])
+  @@index([reviewerEmployeeId, status])
+  @@map("reviewer_assignments")
+}
+
+model FeedbackResponse {
+  id           String   @id @default(uuid()) @db.Uuid
+  assignmentId String   @map("assignment_id") @db.Uuid
+  questionId   String   @map("question_id") @db.Uuid
+  ratingValue  Decimal? @map("rating_value") @db.Decimal(6, 2)
+  textValue    String?  @map("text_value")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  assignment ReviewerAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+
+  @@unique([assignmentId, questionId], name: "assignment_question", map: "uq_feedback_response")
+  @@index([assignmentId])
+  @@map("feedback_responses")
+}
+
+// ===========================================================================
+// Integration (Phase 13): programmatic API keys + outbound webhooks.
+// ===========================================================================
+
+model ApiKey {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String    @db.VarChar(120)
+  prefix         String    @db.VarChar(24)
+  keyHash        String    @unique @map("key_hash")
+  scopes         String[]  @default([])
+  lastUsedAt     DateTime? @map("last_used_at") @db.Timestamptz(6)
+  expiresAt      DateTime? @map("expires_at") @db.Timestamptz(6)
+  revokedAt      DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([organizationId])
+  @@map("api_keys")
+}
+
+model WebhookEndpoint {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  url            String
+  events         String[] @default([])
+  secret         String
+  isActive       Boolean  @default(true) @map("is_active")
+  description    String?  @db.VarChar(200)
+  createdBy      String?  @map("created_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  deliveries WebhookDelivery[]
+
+  @@index([organizationId])
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id         String   @id @default(uuid()) @db.Uuid
+  endpointId String   @map("endpoint_id") @db.Uuid
+  event      String   @db.VarChar(80)
+  payload    Json
+  status     String   @default("pending") @db.VarChar(20)
+  statusCode Int?     @map("status_code")
+  error      String?
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([endpointId])
+  @@map("webhook_deliveries")
+}
+
+// ===========================================================================
+// Development action plans (Phase 13 high-value): turn feedback into trackable
+// development actions per employee.
+// ===========================================================================
+
+model DevelopmentAction {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  employeeId     String    @map("employee_id") @db.Uuid
+  competency     String?   @db.VarChar(200)
+  title          String    @db.VarChar(300)
+  description    String?
+  status         String    @default("open") @db.VarChar(20)
+  priority       String    @default("medium") @db.VarChar(20)
+  dueDate        DateTime? @map("due_date") @db.Date
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([organizationId])
+  @@index([employeeId])
+  @@map("development_actions")
+}
+
+// ===========================================================================
+// Nice-to-have: scheduled report digests + in-app notifications.
+// (No Prisma relations declared — plain tenant-scoped tables to avoid touching
+//  the User/Organization models; FKs still enforced in the DDL.)
+// ===========================================================================
+
+model ReportSchedule {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  name           String    @db.VarChar(200)
+  reportType     String    @map("report_type") @db.VarChar(40)
+  frequency      String    @default("weekly") @db.VarChar(20)
+  recipients     String[]  @default([])
+  cycleId        String?   @map("cycle_id") @db.Uuid
+  isActive       Boolean   @default(true) @map("is_active")
+  lastRunAt      DateTime? @map("last_run_at") @db.Timestamptz(6)
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([organizationId])
+  @@map("report_schedules")
+}
+
+model UserNotification {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  type           String    @db.VarChar(40)
+  title          String    @db.VarChar(200)
+  body           String?
+  link           String?   @db.VarChar(300)
+  readAt         DateTime? @map("read_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([userId])
+  @@index([organizationId])
+  @@map("user_notifications")
+}
+
+// ===========================================================================
+// External evaluation (SIS Phase 2): tokenised, no-login evaluation links sent
+// to parents so they can evaluate a teacher for a specific subject. SIS entities
+// are external, so their ids/labels are denormalised here (no FKs into SIS).
+// ===========================================================================
+
+model EvaluationLink {
+  id                   String    @id @default(uuid()) @db.Uuid
+  organizationId       String    @map("organization_id") @db.Uuid
+  tokenHash            String    @unique @map("token_hash") @db.VarChar(128)
+  // SIS refs + denormalised labels
+  studentId            String    @map("student_id") @db.VarChar(64)
+  studentName          String?   @map("student_name") @db.VarChar(200)
+  parentId             String?   @map("parent_id") @db.VarChar(64)
+  parentName           String?   @map("parent_name") @db.VarChar(200)
+  recipient            String?   @db.VarChar(255)
+  /// NULL on a consolidated link: the form is student-scoped and the teachers it
+  /// covers live in `evaluation_link_targets`.
+  teacherId            String?   @map("teacher_id") @db.VarChar(64)
+  teacherName          String?   @map("teacher_name") @db.VarChar(200)
+  subjectId            String?   @map("subject_id") @db.VarChar(64)
+  subjectName          String?   @map("subject_name") @db.VarChar(200)
+  teachingAssignmentId String?   @map("teaching_assignment_id") @db.VarChar(64)
+  className            String?   @map("class_name") @db.VarChar(120)
+  sectionName          String?   @map("section_name") @db.VarChar(120)
+  sessionName          String?   @map("session_name") @db.VarChar(120)
+  templateId           String?   @map("template_id") @db.Uuid
+  // Resolved 360 binding (SIS Phase 2 identity mapping): the employee the teacher
+  // maps to, plus the cycle + external reviewer assignment the feedback feeds.
+  employeeId           String?   @map("employee_id") @db.Uuid
+  cycleId              String?   @map("cycle_id") @db.Uuid
+  reviewerAssignmentId String?   @map("reviewer_assignment_id") @db.Uuid
+  /// NULL = the original per-teacher form. 'consolidated' = one form per student.
+  mode                 String?   @db.VarChar(24)
+  status               String    @default("pending") @db.VarChar(20)
+  oneTime              Boolean   @default(true) @map("one_time")
+  expiresAt            DateTime? @map("expires_at") @db.Timestamptz(6)
+  responses            Json?
+  overallScore         Decimal?  @map("overall_score") @db.Decimal(6, 2)
+  comment              String?
+  sendChannel          String?   @map("send_channel") @db.VarChar(20)
+  sentAt               DateTime? @map("sent_at") @db.Timestamptz(6)
+  openedAt             DateTime? @map("opened_at") @db.Timestamptz(6)
+  completedAt          DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdBy            String?   @map("created_by") @db.Uuid
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  targets EvaluationLinkTarget[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, studentId])
+  @@map("evaluation_links")
+}
+
+/// One teacher on a consolidated parent form.
+///
+/// The teacher list is SNAPSHOTTED when the link is generated rather than resolved
+/// live from the SIS each time the parent opens it. That keeps the form stable for
+/// the life of the link and guarantees it matches the reviewer assignments created
+/// alongside it — a live lookup could show a teacher who has no assignment, or hide
+/// one who does. Regenerating the link re-snapshots.
+model EvaluationLinkTarget {
+  id                   String   @id @default(uuid()) @db.Uuid
+  linkId               String   @map("link_id") @db.Uuid
+  /// SIS teacher id, deduplicated: a teacher who teaches the child two subjects
+  /// appears once, with the subjects joined into `subjectNames`.
+  teacherId            String   @map("teacher_id") @db.VarChar(64)
+  teacherName          String?  @map("teacher_name") @db.VarChar(200)
+  subjectNames         String?  @map("subject_names") @db.VarChar(400)
+  teachingAssignmentId String?  @map("teaching_assignment_id") @db.VarChar(64)
+  /// The 360 employee the SIS teacher maps to. Resolved once at generation.
+  employeeId           String   @map("employee_id") @db.Uuid
+  reviewerAssignmentId String?  @map("reviewer_assignment_id") @db.Uuid
+  ratingValue          Decimal? @map("rating_value") @db.Decimal(6, 2)
+  /// pending | submitted | skipped. 'skipped' is a teacher the parent chose not to
+  /// rate: no response row, the assignment stays unsubmitted, so the teacher is
+  /// excluded from both the score and the anonymity count.
+  status               String   @default("pending") @db.VarChar(20)
+  sortOrder            Int      @default(0) @map("sort_order")
+
+  link EvaluationLink @relation(fields: [linkId], references: [id], onDelete: Cascade)
+
+  @@unique([linkId, teacherId], name: "link_teacher", map: "uq_evaluation_link_target")
+  @@index([linkId])
+  @@index([reviewerAssignmentId])
+  @@map("evaluation_link_targets")
+}
+
+// ===========================================================================
+// External identity mapping (SIS Phase 2): links an external actor (SIS teacher,
+// and later student/alumni/client/…) to exactly one 360 Employee via an explicit,
+// admin-maintained record keyed on a stable external identifier (not names). The
+// same table generalises to any future external evaluator type — no schema change.
+// ===========================================================================
+
+model ExternalIdentityMap {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  externalType   String   @map("external_type") @db.VarChar(30)
+  externalId     String   @map("external_id") @db.VarChar(64)
+  externalCode   String?  @map("external_code") @db.VarChar(120)
+  matchKey       String   @default("employee_code") @map("match_key") @db.VarChar(60)
+  employeeId     String   @map("employee_id") @db.Uuid
+  active         Boolean  @default(true)
+  createdBy      String?  @map("created_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@unique([organizationId, externalType, externalId], name: "identity_scope", map: "uq_external_identity")
+  @@index([organizationId, externalType])
+  @@index([employeeId])
+  @@map("external_identity_maps")
+}
+
+/// Audit + result record for a Bulk Feedback Cycle generation run. Additive only:
+/// it references existing employees/cycles and introduces NO parallel hierarchy.
+model BulkGenerationRun {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  cycleId        String?   @map("cycle_id") @db.Uuid
+  cycleName      String?   @map("cycle_name") @db.VarChar(200)
+  initiatedBy    String?   @map("initiated_by") @db.Uuid
+  initiatedByName String?  @map("initiated_by_name") @db.VarChar(200)
+  scopeType      String    @map("scope_type") @db.VarChar(20)
+  scopeId        String?   @map("scope_id") @db.Uuid
+  scopeName      String?   @map("scope_name") @db.VarChar(200)
+  status         String    @default("completed") @db.VarChar(20)
+  config         Json?
+  summary        Json?
+  skipped        Json?
+  failed         Json?
+  assignmentsCreated Int   @default(0) @map("assignments_created")
+  skippedCount   Int       @default(0) @map("skipped_count")
+  failedCount    Int       @default(0) @map("failed_count")
+  messagesQueued Int       @default(0) @map("messages_queued")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  @@index([organizationId, createdAt])
+  @@map("bulk_generation_runs")
+}
+
+/// Dedicated, append-only audit trail for 360 Feedback lifecycle activities.
+/// References existing employees/cycles/links by id only (no duplicate data) and
+/// deliberately stores action + identifiers, NOT sensitive feedback content.
+/// Append-only is enforced at the DB level by a trigger (see 001_reconcile.sql).
+model FeedbackAuditEvent {
+  id                  String   @id @default(uuid()) @db.Uuid
+  organizationId      String   @map("organization_id") @db.Uuid
+  action              String   @db.VarChar(80)
+  /// Actor (null for anonymous parent / system-scheduler events).
+  actorUserId         String?  @map("actor_user_id") @db.Uuid
+  actorName           String?  @map("actor_name") @db.VarChar(200)
+  /// Snapshot of the actor's role names at event time (or 'External' / 'System').
+  actorRole           String?  @map("actor_role") @db.VarChar(200)
+  cycleId             String?  @map("cycle_id") @db.Uuid
+  cycleName           String?  @map("cycle_name") @db.VarChar(200)
+  evaluateeEmployeeId String?  @map("evaluatee_employee_id") @db.Uuid
+  evaluateeName       String?  @map("evaluatee_name") @db.VarChar(200)
+  evaluatorEmployeeId String?  @map("evaluator_employee_id") @db.Uuid
+  /// Evaluator display (covers external/parent reviewers with no employee record).
+  evaluatorName       String?  @map("evaluator_name") @db.VarChar(200)
+  /// Evaluator source/type: Manager | Peer | Subordinate | Self | Parent | ...
+  sourceType          String?  @map("source_type") @db.VarChar(60)
+  /// Affected record kind + id (id kept as text: links/tokens aren't all UUIDs).
+  entityType          String   @map("entity_type") @db.VarChar(80)
+  entityId            String?  @map("entity_id") @db.VarChar(64)
+  previousValue       Json?    @map("previous_value")
+  newValue            Json?    @map("new_value")
+  reason              String?
+  ip                  String?  @db.VarChar(60)
+  userAgent           String?  @map("user_agent")
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, cycleId])
+  @@index([organizationId, evaluateeEmployeeId])
+  @@index([organizationId, action])
+  @@map("feedback_audit_events")
+}
+
+/// Organization Data Import & Onboarding — one row per import attempt. Stores the
+/// parsed dataset + validation result (Upload→Validate→Preview) so Confirm can run
+/// without re-uploading, and the post-import summary/error report. Additive; no
+/// changes to the org structural tables it feeds.
+model OrganizationImportJob {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdByName  String?   @map("created_by_name") @db.VarChar(200)
+  filename       String?   @db.VarChar(255)
+  /// validated | imported | failed
+  status         String    @default("validated") @db.VarChar(20)
+  /// skip | update | replace | reset (set at confirm)
+  mode           String?   @db.VarChar(20)
+  dataset        Json?     // normalized parsed rows per entity
+  validation     Json?     // { counts, preview, errors[], warnings[] }
+  summary        Json?     // post-import { perEntity created/updated/skipped/failed, warnings }
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  importedAt     DateTime? @map("imported_at") @db.Timestamptz(6)
+
+  @@index([organizationId, createdAt])
+  @@map("organization_import_jobs")
+}
+
+/// External HR Integration — one row per synchronization attempt (dry-run or live).
+/// Mirrors the OrganizationImportJob/BulkGenerationRun pattern; additive only. The
+/// sync reconciles an external HR snapshot into the existing internal model — this
+/// table is the history/audit of those runs, not a parallel data store.
+model HrSyncRun {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  provider       String    @db.VarChar(60)
+  /// dry_run | live
+  mode           String    @db.VarChar(20)
+  /// manual | scheduled
+  trigger        String    @default("manual") @db.VarChar(20)
+  /// completed | failed
+  status         String    @default("completed") @db.VarChar(20)
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdByName  String?   @map("created_by_name") @db.VarChar(200)
+  created        Int       @default(0)
+  updated        Int       @default(0)
+  deactivated    Int       @default(0)
+  failed         Int       @default(0)
+  warnings       Int       @default(0)
+  summary        Json?     // per-entity counts + deactivation list + issues + verify
+  startedAt      DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt     DateTime? @map("finished_at") @db.Timestamptz(6)
+
+  @@index([organizationId, startedAt])
+  @@map("hr_sync_runs")
+}
+
+/// Student/SIS Integration — the persisted per-organization SIS dataset (one row per
+/// org). The whole roster snapshot (campuses/programs/sessions/classes/sections/
+/// subjects/teachers/students/guardians/teaching-assignments/enrollments) is stored
+/// as JSON and served through the EXISTING SisProvider interface, so no relational
+/// student model is introduced and the 360 business logic is unchanged. Additive.
+model SisDataset {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @unique @map("organization_id") @db.Uuid
+  provider       String   @db.VarChar(60)
+  snapshot       Json     // the full SisSnapshot
+  studentCount   Int      @default(0) @map("student_count")
+  teacherCount   Int      @default(0) @map("teacher_count")
+  updatedBy      String?  @map("updated_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("sis_datasets")
+}
+
+/// Student/SIS Integration — synchronization/import run history (dry-run or live).
+/// Mirrors hr_sync_runs. Additive.
+model SisSyncRun {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  provider       String    @db.VarChar(60)
+  /// dry_run | live
+  mode           String    @db.VarChar(20)
+  /// manual | scheduled
+  trigger        String    @default("manual") @db.VarChar(20)
+  /// completed | failed
+  status         String    @default("completed") @db.VarChar(20)
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdByName  String?   @map("created_by_name") @db.VarChar(200)
+  created        Int       @default(0)
+  updated        Int       @default(0)
+  deactivated    Int       @default(0)
+  failed         Int       @default(0)
+  warnings       Int       @default(0)
+  summary        Json?     // per-entity counts + deactivation list + issues + verify
+  startedAt      DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt     DateTime? @map("finished_at") @db.Timestamptz(6)
+
+  @@index([organizationId, startedAt])
+  @@map("sis_sync_runs")
+}

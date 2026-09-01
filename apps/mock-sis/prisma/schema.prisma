@@ -1,0 +1,223 @@
+// Mock Student Information System (SIS) — schema.
+// A standalone database that emulates an external vendor SIS. The 360 Feedback
+// System never touches these tables directly; it calls the vendor REST APIs.
+//
+// The central academic relationship is the TeachingAssignment
+// (Teacher X teaches Subject Y to Class/Section Z in Session A). Students are
+// enrolled into TeachingAssignments, NOT mapped to teachers directly.
+//
+// The generated client is written to a private path so it never clashes with
+// the 360 app's Prisma client in the shared workspace node_modules.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("MOCK_SIS_DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Academic structure (master tables)
+// ---------------------------------------------------------------------------
+
+model Campus {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      String   @unique @db.VarChar(30)
+  name      String   @db.VarChar(150)
+  city      String?  @db.VarChar(100)
+  status    String   @default("active") @db.VarChar(20)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("campuses")
+}
+
+model Faculty {
+  id       String @id @default(uuid()) @db.Uuid
+  campusId String @map("campus_id") @db.Uuid
+  code     String @db.VarChar(30)
+  name     String @db.VarChar(150)
+  status   String @default("active") @db.VarChar(20)
+
+  @@index([campusId])
+  @@map("faculties")
+}
+
+model Department {
+  id        String @id @default(uuid()) @db.Uuid
+  facultyId String @map("faculty_id") @db.Uuid
+  code      String @db.VarChar(30)
+  name      String @db.VarChar(150)
+  status    String @default("active") @db.VarChar(20)
+
+  @@index([facultyId])
+  @@map("departments")
+}
+
+model Program {
+  id           String @id @default(uuid()) @db.Uuid
+  departmentId String @map("department_id") @db.Uuid
+  code         String @db.VarChar(30)
+  name         String @db.VarChar(150)
+  level        String @default("undergraduate") @db.VarChar(30)
+  status       String @default("active") @db.VarChar(20)
+
+  @@index([departmentId])
+  @@map("programs")
+}
+
+model AcademicSession {
+  id        String    @id @default(uuid()) @db.Uuid
+  code      String    @unique @db.VarChar(30)
+  name      String    @db.VarChar(120)
+  startDate DateTime? @map("start_date") @db.Date
+  endDate   DateTime? @map("end_date") @db.Date
+  status    String    @default("active") @db.VarChar(20)
+
+  @@map("academic_sessions")
+}
+
+model Semester {
+  id        String @id @default(uuid()) @db.Uuid
+  sessionId String @map("session_id") @db.Uuid
+  code      String @db.VarChar(30)
+  name      String @db.VarChar(120)
+  term      String @db.VarChar(30) // Fall / Spring / Summer
+  status    String @default("active") @db.VarChar(20)
+
+  @@index([sessionId])
+  @@map("semesters")
+}
+
+model GradeClass {
+  id        String @id @default(uuid()) @db.Uuid
+  programId String @map("program_id") @db.Uuid
+  code      String @db.VarChar(30)
+  name      String @db.VarChar(120) // "Year 1", "Grade 9", "Semester 1"
+  status    String @default("active") @db.VarChar(20)
+
+  @@index([programId])
+  @@map("classes")
+}
+
+model Section {
+  id           String @id @default(uuid()) @db.Uuid
+  gradeClassId String @map("grade_class_id") @db.Uuid
+  code         String @db.VarChar(30) // "A", "B"
+  name         String @db.VarChar(60)
+  capacity     Int    @default(40)
+  status       String @default("active") @db.VarChar(20)
+
+  @@index([gradeClassId])
+  @@map("sections")
+}
+
+model Subject {
+  id           String @id @default(uuid()) @db.Uuid
+  code         String @unique @db.VarChar(40)
+  name         String @db.VarChar(200)
+  departmentId String @map("department_id") @db.Uuid
+  programId    String @map("program_id") @db.Uuid
+  creditHours  Int    @default(3) @map("credit_hours")
+  status       String @default("active") @db.VarChar(20)
+
+  @@index([departmentId])
+  @@index([programId])
+  @@map("subjects")
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+model Student {
+  id               String    @id @default(uuid()) @db.Uuid
+  registrationNo   String    @unique @map("registration_no") @db.VarChar(40)
+  rollNo           String    @map("roll_no") @db.VarChar(40)
+  name             String    @db.VarChar(150)
+  gender           String    @db.VarChar(20)
+  dateOfBirth      DateTime? @map("date_of_birth") @db.Date
+  programId        String    @map("program_id") @db.Uuid
+  campusId         String    @map("campus_id") @db.Uuid
+  facultyId        String    @map("faculty_id") @db.Uuid
+  departmentId     String    @map("department_id") @db.Uuid
+  currentClassId   String    @map("current_class_id") @db.Uuid
+  currentSectionId String    @map("current_section_id") @db.Uuid
+  sessionId        String    @map("session_id") @db.Uuid
+  semesterId       String?   @map("semester_id") @db.Uuid
+  admissionDate    DateTime? @map("admission_date") @db.Date
+  status           String    @default("active") @db.VarChar(20)
+
+  @@index([campusId])
+  @@index([programId])
+  @@map("students")
+}
+
+model Parent {
+  id                String  @id @default(uuid()) @db.Uuid
+  studentId         String  @map("student_id") @db.Uuid
+  name              String  @db.VarChar(150)
+  relationship      String  @db.VarChar(40) // Father / Mother / Guardian
+  mobile            String? @db.VarChar(40)
+  whatsapp          String? @db.VarChar(40)
+  email             String? @db.VarChar(150)
+  preferredLanguage String  @default("en") @map("preferred_language") @db.VarChar(10)
+  active            Boolean @default(true)
+
+  @@index([studentId])
+  @@map("parents")
+}
+
+model Teacher {
+  id           String  @id @default(uuid()) @db.Uuid
+  employeeCode String  @unique @map("employee_code") @db.VarChar(40)
+  name         String  @db.VarChar(150)
+  designation  String  @db.VarChar(120)
+  departmentId String  @map("department_id") @db.Uuid
+  facultyId    String  @map("faculty_id") @db.Uuid
+  mobile       String? @db.VarChar(40)
+  email        String? @db.VarChar(150)
+  status       String  @default("active") @db.VarChar(20)
+
+  @@index([departmentId])
+  @@map("teachers")
+}
+
+// ---------------------------------------------------------------------------
+// Teaching assignment (the PRIMARY academic relationship) + enrollment
+// ---------------------------------------------------------------------------
+
+model TeachingAssignment {
+  id           String    @id @default(uuid()) @db.Uuid
+  teacherId    String    @map("teacher_id") @db.Uuid
+  subjectId    String    @map("subject_id") @db.Uuid
+  sessionId    String    @map("session_id") @db.Uuid
+  campusId     String    @map("campus_id") @db.Uuid
+  programId    String    @map("program_id") @db.Uuid
+  semesterId   String    @map("semester_id") @db.Uuid
+  gradeClassId String    @map("grade_class_id") @db.Uuid
+  sectionId    String    @map("section_id") @db.Uuid
+  startDate    DateTime? @map("start_date") @db.Date
+  endDate      DateTime? @map("end_date") @db.Date
+  status       String    @default("active") @db.VarChar(20)
+
+  @@index([teacherId])
+  @@index([subjectId])
+  @@index([sessionId])
+  @@map("teaching_assignments")
+}
+
+model StudentEnrollment {
+  id                   String    @id @default(uuid()) @db.Uuid
+  studentId            String    @map("student_id") @db.Uuid
+  teachingAssignmentId String    @map("teaching_assignment_id") @db.Uuid
+  enrollmentDate       DateTime? @map("enrollment_date") @db.Date
+  status               String    @default("active") @db.VarChar(20)
+
+  @@unique([studentId, teachingAssignmentId], name: "student_assignment")
+  @@index([studentId])
+  @@index([teachingAssignmentId])
+  @@map("student_enrollments")
+}

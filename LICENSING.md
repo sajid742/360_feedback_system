@@ -1,0 +1,333 @@
+# Licensing
+
+The application is licensed per organisation. A licence is a short signed string that
+states who it is for, until when, how many employees it covers and which modules are
+included. It is verified **entirely locally** — there is no licensing server and no
+network call — because this product is deployed on-premise.
+
+---
+
+## 1. For the administrator
+
+**Licence** in the main menu (permission `configuration.read`). It shows status, the
+licence details, usage against the employee limit, and the included modules.
+
+Installing or renewing needs `configuration.manage` — Super Admin by default. Paste the
+licence you were sent, or choose the file, and press **Install licence**. It is verified
+before anything is stored, so a mistyped or wrong licence can never displace a working one.
+
+### Statuses
+
+| Status | What it means | What still works |
+|---|---|---|
+| **Active** | Everything normal | Everything |
+| **Expiring soon** | Within 30 days of expiry | Everything. A banner appears |
+| **Grace period** | Past expiry, inside the grace window (7 days by default) | Everything. A banner appears |
+| **Expired** | Past the grace window | Reading, reporting, exporting and renewing. **Adding employees is blocked** |
+| **Not yet active** | Installed ahead of its start date | Nothing new until the start date |
+| **Suspended** | Withdrawn by the supplier | Reading and renewing |
+| **Invalid** | Signature, format or organisation mismatch | Reading and renewing |
+| **Not licensed** | Nothing installed | Reading and renewing |
+
+**Expiry never destroys anything.** No data is deleted, hidden or altered; the database
+stays fully accessible; administrators can always reach this page and install a renewal.
+An expired licence stops *new* records being created — that is all.
+
+### The employee limit
+
+The limit counts **active** employees. People who have left and been deactivated keep
+their feedback history and stop counting, so the number reflects who you are actually
+running feedback for.
+
+At the limit, adding a person is refused with a message that names the numbers:
+
+> This licence covers 100 active employees. You currently have 100, so there is room for
+> 0 more, but 1 was requested. Nothing has been added. Deactivate employees who have
+> left, or upgrade the licence.
+
+A bulk import is checked **as a whole, before anything is written**. An import that would
+exceed the limit is rejected entirely — never partially applied.
+
+### Licence vs permissions
+
+Two different questions, both of which must be answered yes:
+
+- **The licence** asks *did this organisation buy this module?*
+- **RBAC** asks *is this user allowed to use it?*
+
+A user with every SIS permission sees nothing if the licence excludes SIS. An unlicensed
+module answers `404`, the same as a route that does not exist.
+
+---
+
+## 2. For the vendor — issuing licences
+
+> **These tools need nothing but Node.** They are plain JavaScript with no
+> dependencies, so they work in any copy of the folder — including a Docker deployment
+> where `node_modules` was never installed. You do **not** need `npm install`, and you
+> must **never** run them inside a customer's container: the private key belongs on your
+> machine and nowhere else.
+
+### Once, ever: create the signing keys
+
+```bash
+npm run license:keygen
+```
+
+Or, from anywhere, without npm at all:
+
+```bash
+node apps/api/scripts/license.cjs keygen
+```
+
+Writes `license-public.pem` and `license-private.pem` to `../e360-license-keys`
+(outside the repository, deliberately).
+
+- **`license-private.pem`** — the only thing that can mint a licence. Keep it off every
+  server, back it up, never commit it. Losing it means re-issuing every licence;
+  leaking it means anyone can mint their own.
+- **`license-public.pem`** — ships with each deployment as `LICENSE_PUBLIC_KEY`. The
+  command prints the exact one-line value to paste into `.env`.
+
+`--force` regenerates and **invalidates every licence already issued**. There is a guard.
+
+### Per customer: issue a licence
+
+```bash
+npm run license:create -- \
+  --org "ABC University" --slug abc \
+  --edition professional --employees 500 \
+  --expires 2026-12-31 \
+  --license-id "ABC-360-2026-0001" \
+  --out abc-license.txt
+```
+
+`--slug` must match the organisation slug of the installation — the value users type at
+sign-in.
+
+> **If flags seem to vanish**, you are on a build before 2026-08-28, where the root
+> `license:*` scripts hopped through `npm run -w apps/api`. Two npm argument parsers in
+> series eat `--org value` pairs as if they were npm's own config, and the tool sees only
+> the values. The scripts now call the tool directly in one hop. On any build, this always
+> works and bypasses npm entirely:
+>
+> ```bash
+> node apps/api/scripts/license.cjs create --org "ABC University" --slug abc --out abc-license.txt
+> ```
+
+| Option | Default |
+|---|---|
+| `--edition` | `professional` |
+| `--employees` | from the edition |
+| `--days` / `--expires` | from the edition (365) |
+| `--starts` | today |
+| `--modules` | from the edition, comma-separated |
+| `--grace-days` | 7 |
+| `--users`, `--notes`, `--org-id` | not set |
+| `--out` | prints to the terminal |
+
+Edition presets — starting points only, every value is overridable:
+
+| Edition | Days | Employees | Modules |
+|---|---|---|---|
+| `trial` | 30 | 50 | feedback, organization, reports |
+| `demo` | 60 | 100 | all |
+| `standard` | 365 | 100 | + communication |
+| `professional` | 365 | 500 | + parent feedback, SIS, HR |
+| `enterprise` | 365 | unlimited | all |
+
+### Checking a licence
+
+```bash
+npm run license:inspect -- --file abc-license.txt   # read it, no signature check
+npm run license:verify  -- --file abc-license.txt   # check the signature and dates
+```
+
+---
+
+## 3. Technical
+
+### Algorithm and keys
+
+**Ed25519**, via Node's built-in `crypto` — no dependency added. Chosen because keys and
+signatures are small enough to keep a licence paste-able, and because there is no
+algorithm-negotiation step and therefore no "alg: none" class of mistake.
+
+Format: `E360-<base64url(payload)>.<base64url(signature)>`. The payload is deliberately
+readable — a licence is a signed claim, not a secret. Editing the readable part breaks
+the signature, which is the whole point.
+
+The deployed application holds only the public key and can therefore only verify.
+
+### Storage — no migration
+
+The licence lives in the existing `configurations` table as
+`module='license', key='current'`. That table is already tenant-scoped, already JSONB,
+already carries `created_by`/`updated_by`, and is already in PostgreSQL — so licensing
+needed **no schema change at all**, and the licence is covered by your existing database
+backup and survives any container restart.
+
+Only the licence string and who installed it are stored. Status and usage are recomputed
+on every read, because a stored status goes stale the moment a date passes.
+
+### Tenant binding
+
+Bound to the organisation **slug**, not its UUID.
+
+The slug is what the customer types to sign in and what the vendor knows them by, and it
+survives a database restore. A UUID does not — restoring into a freshly bootstrapped
+database produces a new one, and binding to it would invalidate a legitimate licence at
+the worst possible moment. The organisation id is recorded and cross-checked, but a
+mismatch only writes a log line; a slug mismatch is what rejects.
+
+Moving a licence to a different customer's installation therefore fails.
+
+### Enforcement points
+
+| Where | What |
+|---|---|
+| `EmployeeService.create` | Employee limit, before any other validation |
+| `ImportService.run` | Employee limit for the whole file, before the transaction |
+| `LicensedFeatureGuard` | Module entitlement, on the SIS, HR, parent-feedback, communication, AI and integration controllers |
+| `LicenseService` | Every check, in one place |
+
+`LicenseService` caches the resolved state for 30 seconds per organisation, so
+verification does not run on every request.
+
+### Adding a new licensed module
+
+1. Add the key to `LICENSED_MODULES` and a label to `MODULE_LABELS`
+   (`apps/api/src/license/license.types.ts`).
+2. Put `@RequiresLicensedModule('your_module')` and `LicensedFeatureGuard` on the controller.
+3. Add the route to `ROUTE_MODULE` in `apps/web/src/features/license/useLicense.ts` so the
+   menu item hides too.
+
+---
+
+## 4. Development, demo and production
+
+| Mode | Behaviour |
+|---|---|
+| **Development** | `NODE_ENV` is not `production` and no licence is installed → a built-in development licence: all modules, unlimited employees. `npm run dev`, `db:demo` and `start-dev.ps1` work unchanged. It is labelled "Development" in the UI and in the API. |
+| **Demo** | Issue a real `demo` licence (`--edition demo`) so a demonstration shows genuine licence behaviour. |
+| **Production** | The Docker runtime image sets `NODE_ENV=production`, so the development licence never applies. A licence must be installed. |
+
+Set `LICENSE_REQUIRE=true` to switch the development licence off outside production.
+
+The development licence is not a hidden bypass: it depends on `NODE_ENV`, it is reported
+as `isDevelopment: true`, and it is stated plainly on the licence page.
+
+### Running the test suite
+
+The API regression suite assumes every module is available, which is true on a
+development installation (the development licence includes all of them). **If you install
+a restricted production licence into a development database, two tests will fail** — the
+AI Insights and external-API tests — because those modules are correctly returning 404.
+That is the licence working, not a defect. Remove the licence row, or run the suite
+against a development installation:
+
+```sql
+DELETE FROM configurations WHERE module = 'license';
+```
+
+## 5. Existing installations
+
+Nothing locks out on upgrade:
+
+- **Development and demo installations** pick up the development licence automatically.
+- **Production installations** show status *Not licensed* with a clear message. Reading,
+  reporting and administration continue; adding employees is blocked until a licence is
+  installed. No data is touched.
+
+There is no migration to run and no one-time activation step.
+
+## 6. Docker — end to end
+
+### The one ordering rule
+
+**`LICENSE_PUBLIC_KEY` must be in `.env` and the API restarted BEFORE you install a
+licence.** Without it the application has nothing to check a signature against, and the
+Install button answers:
+
+> This installation has no licence verification key configured, so licences cannot be
+> checked. Set LICENSE_PUBLIC_KEY and restart the API.
+
+The API container runs with `NODE_ENV=production`, so the built-in development licence
+does **not** apply in Docker. A real licence is required.
+
+### Step 1 — create `.env` (once per deployment)
+
+```powershell
+cd "C:\path\to\Enterprise360_App"
+.\start-docker.ps1
+```
+
+`start-docker.ps1` calls `ops\init-env.ps1`, which copies `.env.docker.example` to
+`.env` and generates the three values Compose refuses to start without:
+
+| Generated for you | Why it cannot have a default |
+|---|---|
+| `JWT_ACCESS_SECRET` | Signs sessions. A published default would let anyone mint a token |
+| `MFA_ENCRYPTION_KEY` | 64 hex chars. Also encrypts HR/SIS provider secrets — **back it up with your database**, they are unrecoverable without it |
+| `WAHA_DASHBOARD_PASSWORD` | Unset, WAHA randomises it on every start and prints it only to its own log |
+
+Re-running never overwrites a secret you already have, so it is safe on a working install.
+
+Every other variable has a working default. The ones worth setting per client:
+
+```env
+ORG_NAME=ABC University          # first-run tenant (used once by db-init)
+ORG_SLUG=abc                     # what users type at sign-in
+ADMIN_EMAIL=admin@abc.edu
+DEFAULT_ORG_SLUG=abc             # which tenant the sign-in page belongs to
+PUBLIC_APP_URL=https://360.abc.edu   # every outgoing link is built from this
+```
+
+### Step 2 — add the licence verification key
+
+The vendor's `npm run license:keygen` prints the exact line. Paste it into `.env`:
+
+```env
+LICENSE_PUBLIC_KEY=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0K...
+```
+
+Then restart so the API reads it. Environment variables are read at process start:
+
+```powershell
+docker compose -f compose.yaml up -d
+```
+
+Compose recreates the `api` container because its configuration changed. No rebuild,
+no data loss.
+
+### Step 3 — install the licence
+
+Sign in as Super Admin, open **Licence** in the menu, paste the licence (or **Choose
+file**), press **Install licence**.
+
+Or check it first from the command line, without installing:
+
+```powershell
+npm run license:verify -- --file abc-license.txt
+```
+
+The licence is written to PostgreSQL, so it survives `docker compose down` and `up`, and
+is covered by your normal database backup. Only `docker compose down -v` destroys it,
+along with everything else.
+
+`db-init` never touches the licence — it seeds tenants and demo content only — so a demo
+re-seed cannot overwrite an installed production licence.
+
+### If it is refused
+
+| Message | Cause |
+|---|---|
+| *no licence verification key configured* | `LICENSE_PUBLIC_KEY` missing, or the API was not restarted after adding it |
+| *issued for the organisation "x", but this installation is "y"* | The licence `--slug` must equal `ORG_SLUG` in `.env` |
+| *could not be verified* | Truncated paste, or signed with a different key pair |
+
+## 7. Audit
+
+Licence installation and replacement are recorded in the existing audit trail
+(`entity_type = 'license'`) with the licence id, edition, expiry and limit — never the
+licence string itself. Visible under **Audit Trail**.
