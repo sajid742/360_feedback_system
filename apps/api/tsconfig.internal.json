@@ -1,0 +1,12 @@
+{
+  // Development and CI build config: identical to the shipped build except that source
+  // maps are emitted, so stack traces point at the TypeScript.
+  //
+  // Deliberately the OPT-IN: `npm run build` produces the shipping artefact by default,
+  // and a map-carrying build has to be asked for. A build you must ask for is a build you
+  // cannot ship by accident.
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "sourceMap": true
+  }
+}

@@ -38,6 +38,9 @@
     "license:inspect": "node tools/license.cjs inspect",
     "license:verify": "node tools/license.cjs verify",
     "release": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/make-release.ps1",
+    "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/deploy-release.ps1",
+    "rollback": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/rollback.ps1",
+    "releases": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/rollback.ps1 -List",
     "docker:init": "docker compose run --rm db-init",
     "docker:demo": "docker compose run --rm -e DEMO_RESEED=true db-init",
     "docker:logs": "docker compose logs db-init"

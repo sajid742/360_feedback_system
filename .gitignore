@@ -21,6 +21,11 @@ apps/*/.env
 *-license.txt
 license-*.pem
 
+# Release metadata and pre-deployment database dumps. Machine-local by definition: the
+# manifests reference image IDs in THIS machine's Docker store, so they are meaningless
+# anywhere else. See ops/RELEASES.md.
+releases/
+
 # Logs, backups, OS noise
 *.log
 npm-debug.log*

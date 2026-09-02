@@ -15,8 +15,14 @@
   Safe to re-run. It never overwrites a secret you have already set, so it cannot
   silently invalidate the key that encrypts your HR and SIS provider secrets.
 
-  This is the DOCKER entry point. The from-source workflow is unchanged and still
-  starts with deploy.ps1 / start-dev.ps1.
+  This is the DOCKER entry point for DEVELOPMENT and FIRST RUNS. The from-source workflow
+  is unchanged and still starts with deploy.ps1 / start-dev.ps1.
+
+  FOR A WORKING INSTALLATION YOU CANNOT AFFORD TO LOSE, use ops\deploy-release.ps1
+  instead. This script rebuilds the images in place, which leaves the previous ones
+  dangling and therefore prunable; deploy-release.ps1 tags and records the running set
+  first, verifies the new one, and restores the previous release automatically if it
+  fails. See ops\RELEASES.md. Nothing about this script's behaviour has changed.
 
 .EXAMPLE
   .\start-docker.ps1
