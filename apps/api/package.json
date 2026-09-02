@@ -4,8 +4,9 @@
   "private": true,
   "description": "NestJS API for the Enterprise 360 system",
   "scripts": {
-    "dev": "npx nest start --watch",
+    "dev": "npx nest start --watch -p tsconfig.internal.json",
     "build": "npx nest build",
+    "build:internal": "npx nest build -p tsconfig.internal.json",
     "start": "node dist/main.js",
     "db:generate": "npx prisma@5.22.0 generate",
     "db:seed": "node scripts/run-ts.js prisma/seed.ts",
@@ -19,10 +20,7 @@
     "db:demo": "node scripts/run-ts.js scripts/demo-data.ts",
     "db:purge-client": "node scripts/run-ts.js scripts/purge-client.ts",
     "db:new-client": "node scripts/run-ts.js scripts/new-client.ts",
-    "license:keygen": "node scripts/license.cjs keygen",
-    "license:create": "node scripts/license.cjs create",
-    "license:inspect": "node scripts/license.cjs inspect",
-    "license:verify": "node scripts/license.cjs verify"
+    "build:config": "node scripts/write-build-config.cjs"
   },
   "prisma": {
     "seed": "ts-node --transpile-only prisma/seed.ts"

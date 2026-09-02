@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma/prisma.service';
+import { isInternalBuild } from './build-config';
 import { verifyLicense } from './license.crypto';
 import {
   ALWAYS_ON_MODULES,
@@ -172,13 +173,20 @@ export class LicenseService {
    * DEVELOPMENT LICENCE — the reason `npm run dev` and `db:demo` still work with no
    * licence installed.
    *
-   * It applies only when NODE_ENV is not 'production', which is exactly how the runtime
-   * Docker image is built (`apps/api/Dockerfile` sets NODE_ENV=production), so a real
-   * deployment never picks it up by accident. It is not a hidden bypass: it is reported
-   * as such in the API, printed at startup and labelled in the admin screen.
+   * It exists ONLY in an internal build. It used to be gated on `NODE_ENV`, which is an
+   * environment variable the customer owns: setting it to `development` in their compose
+   * file, with no licence installed, granted every module and unlimited employees. The
+   * gate is now a build-time constant compiled into `dist`, so no environment change can
+   * bring it back — and a mistyped `NODE_ENV` can no longer disable licensing by accident.
+   *
+   * It is not a hidden bypass even in development: it is reported as `isDevelopment` in
+   * the API, printed at startup and labelled in the admin screen.
+   *
+   * `LICENSE_REQUIRE=true` remains, so a developer can exercise real licence behaviour
+   * without a customer build. It can only ever tighten, never loosen.
    */
   private developmentLicense(orgName: string): LicenseState | null {
-    if (process.env.NODE_ENV === 'production') return null;
+    if (!isInternalBuild()) return null;
     if (process.env.LICENSE_REQUIRE === 'true') return null;
     return {
       status: 'ACTIVE',
@@ -298,8 +306,13 @@ export class LicenseService {
     const result = verifyLicense(licenseKey);
     if (!result.ok) {
       throw new BadRequestException(
+        // On a customer build the key is compiled in, so there is nothing the
+        // administrator can set to fix this — it means the build itself is wrong, and
+        // the only honest instruction is to contact the supplier.
         result.reason === 'no-public-key'
-          ? 'This installation has no licence verification key configured, so licences cannot be checked. Set LICENSE_PUBLIC_KEY and restart the API.'
+          ? isInternalBuild()
+            ? 'This development build has no licence verification key. Set LICENSE_PUBLIC_KEY and restart the API.'
+            : 'This installation has no licence verification key, which means the build is faulty. Please contact your supplier — this cannot be fixed by configuration.'
           : 'That licence could not be verified. Check you pasted the whole licence, exactly as supplied.',
       );
     }

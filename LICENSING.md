@@ -77,7 +77,7 @@ npm run license:keygen
 Or, from anywhere, without npm at all:
 
 ```bash
-node apps/api/scripts/license.cjs keygen
+node tools/license.cjs keygen
 ```
 
 Writes `license-public.pem` and `license-private.pem` to `../e360-license-keys`
@@ -86,7 +86,9 @@ Writes `license-public.pem` and `license-private.pem` to `../e360-license-keys`
 - **`license-private.pem`** — the only thing that can mint a licence. Keep it off every
   server, back it up, never commit it. Losing it means re-issuing every licence;
   leaking it means anyone can mint their own.
-- **`license-public.pem`** — ships with each deployment as `LICENSE_PUBLIC_KEY`. The
+- **`license-public.pem`** — **compiled into the release build** by `ops/make-release.ps1`.
+  It is no longer pasted into a customer `.env`: a key read from a file the customer owns
+  could simply be replaced with their own. The
   command prints the exact one-line value to paste into `.env`.
 
 `--force` regenerates and **invalidates every licence already issued**. There is a guard.
@@ -112,7 +114,7 @@ sign-in.
 > works and bypasses npm entirely:
 >
 > ```bash
-> node apps/api/scripts/license.cjs create --org "ABC University" --slug abc --out abc-license.txt
+> node tools/license.cjs create --org "ABC University" --slug abc --out abc-license.txt
 > ```
 
 | Option | Default |
@@ -206,16 +208,31 @@ verification does not run on every request.
 
 ## 4. Development, demo and production
 
-| Mode | Behaviour |
-|---|---|
-| **Development** | `NODE_ENV` is not `production` and no licence is installed → a built-in development licence: all modules, unlimited employees. `npm run dev`, `db:demo` and `start-dev.ps1` work unchanged. It is labelled "Development" in the UI and in the API. |
-| **Demo** | Issue a real `demo` licence (`--edition demo`) so a demonstration shows genuine licence behaviour. |
-| **Production** | The Docker runtime image sets `NODE_ENV=production`, so the development licence never applies. A licence must be installed. |
+Licensing behaviour is fixed at BUILD time, by the build channel compiled into
+`apps/api/src/license/build-config.ts`. It is **not** an environment variable, because on
+an on-premise install the customer owns the environment.
 
-Set `LICENSE_REQUIRE=true` to switch the development licence off outside production.
+| Channel | Development licence | Trusted key | Source maps | Used for |
+|---|---|---|---|---|
+| `internal` | Available when no licence is installed — all modules, unlimited employees, labelled "Development" | `LICENSE_PUBLIC_KEY` honoured | Yes | `npm run dev`, `db:demo`, `start-dev.ps1` |
+| `test` | **Off** | `LICENSE_PUBLIC_KEY` honoured | Yes | CI, so tests exercise real licence behaviour |
+| `customer` | **Compiled out** | Compiled in; the environment is ignored | **No** | Every artefact that leaves the building |
 
-The development licence is not a hidden bypass: it depends on `NODE_ENV`, it is reported
-as `isDevelopment: true`, and it is stated plainly on the licence page.
+The committed default is `internal`, so a fresh clone and `npm run dev` work with no key
+at all. `ops/make-release.ps1` builds with `BUILD_CHANNEL=customer` and stamps in the
+public key; `write-build-config.cjs` **refuses** to produce a customer build without one,
+so a build that would reject every issued licence cannot be shipped by accident.
+
+**Demo:** issue a real `demo` licence (`--edition demo`) so a demonstration shows genuine
+licence behaviour.
+
+`LICENSE_REQUIRE=true` still switches the development licence off on an internal build —
+it can only ever tighten, never loosen.
+
+The development licence is not a hidden bypass: on an internal build it is reported as
+`isDevelopment: true` and stated plainly on the licence page, and on a customer build it
+does not exist in the compiled output at all. **`NODE_ENV` no longer affects licensing**,
+so a mistyped compose file cannot disable it.
 
 ### Running the test suite
 
@@ -243,17 +260,17 @@ There is no migration to run and no one-time activation step.
 
 ## 6. Docker — end to end
 
-### The one ordering rule
+### The verification key needs no setup
 
-**`LICENSE_PUBLIC_KEY` must be in `.env` and the API restarted BEFORE you install a
-licence.** Without it the application has nothing to check a signature against, and the
-Install button answers:
+A release build already carries the trusted public key, compiled in. There is nothing to
+paste into `.env` and nothing to restart before installing a licence — sign in and install
+it.
 
-> This installation has no licence verification key configured, so licences cannot be
-> checked. Set LICENSE_PUBLIC_KEY and restart the API.
+If the Install button ever reports that there is no verification key, the **build** is
+faulty, not the configuration; no environment change can fix it, so contact the supplier.
 
-The API container runs with `NODE_ENV=production`, so the built-in development licence
-does **not** apply in Docker. A real licence is required.
+A release build has the development licence compiled out, so a licence is always
+required.
 
 ### Step 1 — create `.env` (once per deployment)
 
@@ -283,15 +300,14 @@ DEFAULT_ORG_SLUG=abc             # which tenant the sign-in page belongs to
 PUBLIC_APP_URL=https://360.abc.edu   # every outgoing link is built from this
 ```
 
-### Step 2 — add the licence verification key
+### Step 2 — nothing to do
 
-The vendor's `npm run license:keygen` prints the exact line. Paste it into `.env`:
+The verification key is compiled into the release. `LICENSE_PUBLIC_KEY` in
+`.env.docker.example` is inert on a customer build and is kept only so an internal build
+can point at a throwaway key pair.
 
-```env
-LICENSE_PUBLIC_KEY=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0K...
-```
-
-Then restart so the API reads it. Environment variables are read at process start:
+If you are running an **internal** build and want it to check real licences, set the key
+and restart, since environment variables are read at process start:
 
 ```powershell
 docker compose -f compose.yaml up -d
@@ -322,7 +338,7 @@ re-seed cannot overwrite an installed production licence.
 
 | Message | Cause |
 |---|---|
-| *no licence verification key configured* | `LICENSE_PUBLIC_KEY` missing, or the API was not restarted after adding it |
+| *no licence verification key* | The build was produced without a trusted key. Not fixable by configuration — rebuild the release with `ops/make-release.ps1` |
 | *issued for the organisation "x", but this installation is "y"* | The licence `--slug` must equal `ORG_SLUG` in `.env` |
 | *could not be verified* | Truncated paste, or signed with a different key pair |
 

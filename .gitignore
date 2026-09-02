@@ -14,6 +14,13 @@ apps/mock-sis/generated/
 !.env.docker.example
 apps/*/.env
 
+# Issued licences. Not secret — the payload is signed, not encrypted — but they are
+# per-customer deployment artifacts, and the installed licence lives in the database
+# anyway (configurations, module='license'). A copy in the repo only goes stale.
+# The signing keys live OUTSIDE this folder entirely and must never appear here.
+*-license.txt
+license-*.pem
+
 # Logs, backups, OS noise
 *.log
 npm-debug.log*

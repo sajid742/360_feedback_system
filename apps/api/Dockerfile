@@ -18,6 +18,32 @@ COPY packages/shared-types/package.json packages/shared-types/
 RUN npm ci
 # Copy source and build the API (generates the Prisma client, then nest build).
 COPY . .
+
+# Licensing build channel, stamped into src/license/build-config.ts before compiling.
+#
+# Left UNSET, the committed build-config.ts is used exactly as it is — so a plain
+# `docker build`, and `start-docker.ps1`, keep working with no new arguments. A release
+# build passes both, which is what compiles the trusted key in and compiles the
+# development licence out:
+#
+#   docker build -f apps/api/Dockerfile \
+#     --build-arg BUILD_CHANNEL=customer \
+#     --build-arg LICENSE_PUBLIC_KEY_B64="$(cat ../e360-license-keys/license-public.pem | base64 -w0)" \
+#     --build-arg BUILD_ID=2026-09-01 -t e360-api .
+#
+# Pass the PUBLIC key only. The stamper rejects anything that looks like a private key.
+ARG BUILD_CHANNEL=
+ARG LICENSE_PUBLIC_KEY_B64=
+ARG BUILD_ID=
+RUN if [ -n "$BUILD_CHANNEL" ]; then \
+      node apps/api/scripts/write-build-config.cjs \
+        --channel "$BUILD_CHANNEL" \
+        --key "$LICENSE_PUBLIC_KEY_B64" \
+        ${BUILD_ID:+--id "$BUILD_ID"} ; \
+    else \
+      echo "  build channel : using the committed apps/api/src/license/build-config.ts" ; \
+    fi
+
 RUN npm --workspace apps/api run db:generate \
     && npm --workspace apps/api run build
 
@@ -42,6 +68,16 @@ COPY --from=build /app/apps/api ./apps/api
 COPY --from=build /app/apps/mock-sis ./apps/mock-sis
 COPY --from=build /app/database ./database
 COPY --from=build /app/ops ./ops
+# Vendor-only files must not travel in a customer image. `license.cjs` mints licences and
+# `write-build-config.cjs` stamps the trusted key — neither has any business here.
+#
+# `apps/api/src` CANNOT be removed: the seed scripts import from it
+# (bootstrap-tenant → src/provisioning, demo-data → src/appraisal, seed-roles → src/rbac,
+# new-client → src/provisioning), so stripping it breaks first-run initialisation. This
+# image therefore remains the one place a customer can read the API source. Closing that
+# means compiling the seed scripts so they no longer import `src` — a separate change.
+RUN rm -f ./apps/api/scripts/license.cjs ./apps/api/scripts/write-build-config.cjs \
+    && rm -rf ./apps/api/test ./apps/api/dist
 CMD ["bash", "ops/docker-init.sh"]
 
 # ---- runtime stage ----

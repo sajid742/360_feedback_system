@@ -1,4 +1,5 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
+import { BUILD_CHANNEL, TRUSTED_PUBLIC_KEY_B64 } from './build-config';
 import type { LicensePayload } from './license.types';
 
 /**
@@ -23,17 +24,24 @@ import type { LicensePayload } from './license.types';
 const PREFIX = 'E360';
 
 /**
- * The vendor's public key, PEM, base64-encoded so it survives an .env file on one line.
+ * The vendor's public key — the root of trust for every licence.
  *
- * Overridable with LICENSE_PUBLIC_KEY so you can rotate keys or run your own build
- * without editing source. The placeholder below is intentionally NOT a real key: an
- * installation that has not been given one refuses every licence rather than silently
- * accepting anything, and development mode covers the local workflow.
+ * It is COMPILED IN (`build-config.ts`, stamped at build time), not read from the
+ * environment. That distinction is the whole point: on an on-premise install the
+ * customer owns `.env`, so a key read from there could simply be replaced with their
+ * own, after which every licence they minted themselves would verify perfectly.
+ *
+ * `LICENSE_PUBLIC_KEY` is still honoured on INTERNAL and TEST builds, where it is a
+ * convenience for working against a throwaway key pair. On a CUSTOMER build the
+ * environment is ignored entirely.
+ *
+ * An installation with no trusted key refuses every licence rather than silently
+ * accepting anything — and `write-build-config.cjs` refuses to produce a customer build
+ * without one, so that state cannot be shipped by accident.
  */
-const EMBEDDED_PUBLIC_KEY_B64 = '';
-
 export function publicKeyPem(): string | null {
-  const raw = (process.env.LICENSE_PUBLIC_KEY ?? EMBEDDED_PUBLIC_KEY_B64).trim();
+  const fromEnv = BUILD_CHANNEL === 'customer' ? undefined : process.env.LICENSE_PUBLIC_KEY;
+  const raw = (fromEnv ?? TRUSTED_PUBLIC_KEY_B64).trim();
   if (!raw) return null;
   // Accept either a raw PEM (with real newlines or \n escapes) or base64 of one.
   if (raw.includes('BEGIN PUBLIC KEY')) return raw.replace(/\\n/g, '\n');
