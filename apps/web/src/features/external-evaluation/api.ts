@@ -205,6 +205,10 @@ export const evalAdminApi = {
   list: (studentId?: string): Promise<EvaluationLink[]> =>
     apiClient.get('/external-evaluation', studentId ? { studentId } : undefined),
   revoke: (id: string): Promise<EvaluationLink> => apiClient.post(`/external-evaluation/${id}/revoke`),
-  regenerate: (id: string, body?: { channel?: 'whatsapp' | 'email' | 'sms'; recipient?: string }): Promise<EvaluationLink> =>
+  /**
+   * `force` is required only for a link the parent has already submitted: re-issuing
+   * discards their responses and score, so the API refuses without it.
+   */
+  regenerate: (id: string, body?: { channel?: 'whatsapp' | 'email' | 'sms'; recipient?: string; force?: boolean }): Promise<EvaluationLink> =>
     apiClient.post(`/external-evaluation/${id}/regenerate`, body ?? {}),
 };

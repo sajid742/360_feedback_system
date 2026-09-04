@@ -62,16 +62,25 @@ export function SisIntegrationPage(): JSX.Element {
     finally { setBusy(null); }
   }
 
-  async function runImport(dryRun: boolean) {
+  /**
+   * Same two-step gate as `runSync`. An import that would deactivate, rename or
+   * re-point comes back as a PREVIEW with `requiresConfirmation`, having written
+   * nothing; the operator reviews the itemised lists and re-sends with `confirm`.
+   *
+   * The chosen file stays in the input between the two calls, so the confirm step
+   * re-reads and re-sends the same workbook rather than asking for it again.
+   */
+  async function runImport(dryRun: boolean, confirm = false) {
     const file = fileRef.current?.files?.[0];
     if (!file) { setError('Choose an .xlsx or .csv file first.'); return; }
     setBusy(dryRun ? 'dry' : 'live'); setError(null); setMsg(null);
     try {
       const base64 = await fileToBase64(file);
       const entity = /\.csv$/i.test(file.name) ? 'students' : undefined;
-      const r = await sisApi.import({ filename: file.name, base64, entity, dryRun });
+      const r = await sisApi.import({ filename: file.name, base64, entity, dryRun, confirm });
       setResult(r);
-      if (!dryRun && r.ok) { setMsg('Import complete.'); }
+      if (r.requiresConfirmation) setMsg('Nothing was written. Review the changes below, then confirm to apply them.');
+      else if (!dryRun && r.ok) setMsg('Import complete.');
       else if (dryRun) setMsg(r.ok ? 'Validation passed — review, then Import.' : `Validation found ${r.errors.length} error(s).`);
       load();
     } catch (e) { setError(e instanceof ApiError ? e.message : 'Import failed.'); }
@@ -199,13 +208,13 @@ export function SisIntegrationPage(): JSX.Element {
             <h2 className="flex items-center gap-2 text-sm font-bold"><Upload className="size-4 text-brand" /> Import roster (Excel / CSV)</h2>
             <Button variant="ghost" size="sm" onClick={() => sisApi.downloadTemplate()}><Download className="size-4" /> Download template</Button>
           </div>
-          <p className="text-xs text-muted-foreground">Upload the multi-sheet template (Students, Guardians, Teachers, TeachingAssignments, Enrollments) or a single CSV. Existing records update in place; students/teachers no longer present are deactivated (never deleted); teachers whose <code>employee_code</code> matches a 360 employee auto-link for parent feedback.</p>
+          <p className="text-xs text-muted-foreground">Upload the multi-sheet template (Students, Guardians, Teachers, TeachingAssignments, Enrollments) or a single CSV. Existing records update in place, matched on <code>student_id</code> — a student who changes class or teacher stays the same student. Students/teachers no longer present are deactivated (never deleted); teachers whose <code>employee_code</code> matches a 360 employee auto-link for parent feedback. An import that would deactivate, rename or re-point anything stops and shows you the list first.</p>
           <div className="flex flex-wrap items-center gap-2">
             <input ref={fileRef} type="file" accept=".xlsx,.csv" className="text-sm" />
             <Button variant="outline" size="sm" onClick={() => runImport(true)} disabled={!!busy}>{busy === 'dry' ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Validate / preview</Button>
             <Button size="sm" onClick={() => runImport(false)} disabled={!!busy}>{busy === 'live' ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Import</Button>
           </div>
-          {result && <ResultPanel result={result} />}
+          {result && <ResultPanel result={result} onConfirm={result.requiresConfirmation ? () => runImport(false, true) : undefined} busy={busy === 'live'} />}
         </Card>
       )}
 
@@ -281,12 +290,17 @@ function ResultPanel({ result, onConfirm, busy }: { result: SisApplyResult; onCo
         <div className="grid gap-2 rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
           <p className="flex items-start gap-2 font-semibold text-amber-800 dark:text-amber-200">
             <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-            This sync would make significant changes, so nothing was written.
+            This run would make significant changes, so nothing was written.
           </p>
           <p className="text-amber-900 dark:text-amber-200">
             {result.deactivate.length > 0 && <>It would <strong>deactivate {result.deactivate.length}</strong> record(s) that the feed does not mention. </>}
             {result.rename.length > 0 && <>It would <strong>rename {result.rename.length}</strong> existing student(s). </>}
+            {(result.repoint?.length ?? 0) > 0 && <>It would <strong>re-point {result.repoint?.length}</strong> teacher(s) to a different 360 employee. </>}
             Check the lists below — a feed whose IDs overlap a different roster is the usual cause.
+          </p>
+          <p className="text-xs text-amber-900/80 dark:text-amber-200/80">
+            Feedback already collected is never touched: deactivated records are kept, and every
+            evaluation link stores the employee it resolved when it was generated.
           </p>
           <div>
             <Button size="sm" variant="destructive" onClick={onConfirm} disabled={busy}>
@@ -309,6 +323,14 @@ function ResultPanel({ result, onConfirm, busy }: { result: SisApplyResult; onCo
           <span className="font-semibold text-amber-700">Would be renamed:</span>{' '}
           {result.rename.slice(0, 25).map((r) => `${r.code}: ${r.from} → ${r.to}`).join('; ')}
           {result.rename.length > 25 ? ` … and ${result.rename.length - 25} more` : ''}
+        </div>
+      )}
+      {(result.repoint?.length ?? 0) > 0 && (
+        <div className="text-xs">
+          <span className="font-semibold text-rose-600">Teachers that would be re-pointed to a different employee:</span>{' '}
+          {result.repoint?.slice(0, 25).map((r) => `${r.name ?? r.code}: employee ${r.from} → ${r.to}`).join('; ')}
+          {(result.repoint?.length ?? 0) > 25 ? ` … and ${(result.repoint?.length ?? 0) - 25} more` : ''}
+          {' '}— feedback already collected keeps scoring the original employee; only future parent feedback moves.
         </div>
       )}
       {result.preserved?.length > 0 && (

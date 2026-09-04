@@ -1,254 +1,435 @@
-# Deployment & Run Guide — Enterprise 360
+# Deployment Manual — Enterprise 360 Feedback System
 
-A single, self-consistent monorepo. This guide reflects the **current** state.
-For the full administrator-facing manual (environment-variable reference,
-health/readiness policy, containers, CI, backup/restore, upgrade, troubleshooting)
-see `docs/content/deploy.html`; for the partner APIs and connectors see
-`docs/content/api.html`.
+For the system administrator deploying and upgrading the application. Everything here is
+verified against this repository; where a command is shown, it is the command that works.
 
-## Layout
+**Docker is the supported deployment.** The from-source workflow is for development only
+and is covered in `README.md`.
+
+| I want to... | Go to |
+|---|---|
+| Deploy for the first time | [Part 1](#part-1--initial-deployment) |
+| Upgrade a working installation | [Part 2](#part-2--upgrade-deployment) |
+| Undo a bad upgrade | [Part 3](#part-3--rollback) |
+| Understand the Docker architecture | [Part 4](#part-4--docker-architecture) |
+| Fix a startup problem | [Part 6](#part-6--troubleshooting) |
+| Install or renew a licence | `LICENSING.md` |
+| Back up or restore data | `ops/BACKUP_RESTORE.md` |
+| Release mechanics in depth | `ops/RELEASES.md` |
+| Every environment variable | `.env.docker.example` (annotated) and `ops/DOCKER.md` |
+
+---
+
+## Part 1 — Initial deployment
+
+### 1.1 Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| **Docker Desktop** (Windows/macOS) or Docker Engine + Compose v2 (Linux) | Must provide `docker compose` (v2). Standalone `docker-compose` v1 is not supported |
+| **8 GB RAM** available to Docker | Six containers, one of which runs a browser engine |
+| **20 GB free disk** | Images are roughly 4 GB, plus volumes and retained releases |
+| **Windows PowerShell 5.1** or later | For the `.ps1` scripts. No extra modules required |
+| Ports **8080, 3000, 3100, 3001, 5432** free | All configurable — see §1.4 |
+
+No internet access is required at run time. See `LICENSING.md` for air-gapped operation.
+
+### 1.2 Required directory structure
+
+Unzip the release. The folder must contain at least:
 
 ```
-enterprise-360-app/
-  apps/api/                 NestJS — 26 modules; main.ts, app.module.ts
-  apps/web/                 React (Vite) — 21 feature areas + AppShell
-  apps/mock-sis/            standalone vendor-style SIS (own database `mock_sis`)
-  packages/shared-types/
-  database/000_initial_schema.sql   canonical DDL for a FRESH database
-  database/001_reconcile.sql        idempotent, additive reconcile
-  ops/                              DOCKER.md, backup/restore scripts, upgrade runbook
-  compose.yaml                      THE FULL ECOSYSTEM — `docker compose up -d`
-  compose.prod.yaml                 production overlay
-  docker-compose.yml                Postgres 16 + Redis 7 only (dev) — `npm run db:up`
-  package.json                      npm workspace root — all db:*/sis:*/build:* scripts
+compose.yaml            the full stack definition
+.env.docker.example     the environment template
+ops\                    init-env.ps1, docker-init.sh, backup/restore, deploy/rollback
+database\               000_initial_schema.sql, 001_reconcile.sql
+start-docker.ps1        first-run / development entry point
 ```
 
-Both `apps/api` and `apps/web` **type-check clean under strict mode**
-(`npm run typecheck`).
+A package built with `ops\make-release.ps1` also contains `images\*.tar` and
+`load-images.ps1`. **If those are present, load the images and do not build:**
 
-## 1. Prerequisites
-
-Node 20+, npm 10+, Docker (Postgres 16 + Redis 7 via compose). Redis is optional
-— without it, message delivery runs inline. Prisma is pinned to **5.22.0**;
-always invoke it as `npx prisma@5.22.0 …` (the npm scripts already do).
-
-## 2. Infrastructure and environment files
-
-```bash
-cp apps/api/.env.example  apps/api/.env      # then set JWT_ACCESS_SECRET + MFA_ENCRYPTION_KEY
-cp apps/web/.env.example  apps/web/.env
-cp apps/mock-sis/.env.example apps/mock-sis/.env
-npm run db:up                                 # postgres + redis
+```powershell
+.\load-images.ps1
+.\start-docker.ps1 -NoBuild
 ```
 
-`MFA_ENCRYPTION_KEY` must be **exactly 64 hex chars**: `openssl rand -hex 32`.
-Use a different value for `JWT_ACCESS_SECRET`.
+### 1.3 Create the environment file
 
-> The **root** `.env.example` declares only `POSTGRES_*` / `REDIS_PORT` and is
-> consumed by `docker-compose.yml` — it is **not** the API's environment file.
-> Do not copy it to `apps/api/.env`. The authoritative variable list is the
-> environment-variable section of `docs/content/deploy.html`.
-
-> `MFA_ENCRYPTION_KEY` encrypts MFA seeds **and** every stored HR/SIS connector
-> secret. Keep it in your backups (`ops/backup.sh` captures it automatically) —
-> a database restored without the matching key cannot decrypt them.
-
-## 3. Install
-
-```bash
-npm install          # once, at the ROOT — this is an npm-workspaces monorepo
+```powershell
+cd "C:\path\to\Enterprise360_App_2026-08-28-v1"
+.\ops\init-env.ps1
 ```
 
-## 4. Schema → client → seed → tenant
+This copies `.env.docker.example` to `.env` and generates the four values Compose refuses to
+start without. **Re-running it never overwrites a secret you already have**, so it is safe
+on a working install.
 
-```bash
-npm run db:apply             # 000_initial_schema.sql, then 001_reconcile.sql
-npm run db:generate          # npx prisma@5.22.0 generate
-npm run db:seed              # permission catalogue
+| Generated | Why it cannot have a default |
+|---|---|
+| `JWT_ACCESS_SECRET` | Signs sessions. A published default would let anyone mint a token |
+| `MFA_ENCRYPTION_KEY` | 64 hex characters. **Also encrypts HR and SIS provider credentials** |
+| `WAHA_API_KEY` | The `X-Api-Key` the application sends to WAHA |
+| `WAHA_DASHBOARD_PASSWORD` | Unset, WAHA randomises it on every start and prints it only to its own log |
 
-# NOTE the `-w apps/api`. The root db:bootstrap-tenant script is itself an
-# `npm run`, and the second npm hop swallows everything after `--` as npm
-# config — the admin is then created with the DEFAULT password and no error.
-npm run -w apps/api db:bootstrap-tenant -- --no-starter-content \
-  --org "CARE Pvt. Ltd." --slug care \
-  --email sajidq@carepvtltd.com --password 'Password123!'
+> **WARNING — back up `MFA_ENCRYPTION_KEY` with your database.** It encrypts the HR and SIS
+> provider secrets held in PostgreSQL. Lose it and those are unrecoverable: every provider
+> credential must be re-entered and every MFA user re-enrolled.
 
-npm run db:seed-roles        # refresh the five system roles + their grants
-npm run db:sample            # org chart, competencies, published questionnaire
-npm run db:demo              # demo cycles + scored feedback + RBAC role assignments
+### 1.4 Settings to review before the first start
+
+Edit `.env`. Every other variable has a working default.
+
+```env
+ORG_NAME=CARE Pvt. Ltd.              # the first tenant, created once by db-init
+ORG_SLUG=care                        # what users type at sign-in
+ADMIN_EMAIL=admin@carepvtltd.com
+ADMIN_PASSWORD=ChangeThisNow!
+DEFAULT_ORG_SLUG=care                # which tenant the sign-in page belongs to
+PUBLIC_APP_URL=http://192.168.1.50:8080
+SEED_DEMO_DATA=true                  # false gives a clean tenant: admin + roles, no demo content
 ```
 
-**`db:seed-roles` runs AFTER `db:bootstrap-tenant`, not before.** It iterates the
-organisations that already exist and re-seeds their five system roles, so on an
-empty database it has nothing to work on and does nothing. `bootstrap-tenant`
-creates the org *and* its five roles, and `db:seed-roles` afterwards syncs their
-permission grants — which is exactly the order `deploy.ps1` uses (steps 7–8).
-Re-run it after any release that adds permissions.
+> **`PUBLIC_APP_URL` is the setting people get wrong.** Every outgoing link — parent
+> evaluation invitations, password resets, QR codes — is built from it. Left at `localhost`
+> on a shared server, recipients get a link to **their own** computer: delivered, token
+> spent, dead. Set it to the address users will actually type.
 
-`--no-starter-content` matters when `db:sample` will follow: without it the
-tenant ends up with two "Standard 360 Review" templates and two overlapping
-competency sets. `db:demo` is what assigns roles to the 50 sample employees —
-skip it and those logins can do nothing, and the test suites fail.
+Ports, if the defaults clash:
 
-Cross-platform schema apply (Windows-friendly — no local psql needed) is exactly
-what `db:apply` runs:
-
-```bash
-docker compose -f docker-compose.yml cp database/000_initial_schema.sql postgres:/schema.sql
-docker compose -f docker-compose.yml exec -T postgres psql -U postgres -d enterprise360 -v ON_ERROR_STOP=1 -f /schema.sql
-npm run db:reconcile
+```env
+WEB_PORT=8080        API_PORT=3000        MOCK_SIS_PORT=3100
+WAHA_PORT=3001       POSTGRES_PORT=5432
 ```
 
-## 5. Run
+### 1.5 Start
 
-```bash
-npm run dev:api     # http://localhost:3000 — routes under /api/v1
-npm run dev:web     # http://localhost:5173
-npm run dev:sis     # http://localhost:3100/api/v1 (admin UI at /admin) — optional
+```powershell
+.\start-docker.ps1
 ```
 
-Open <http://localhost:5173/login> and sign in with org slug `care`,
-`sajidq@carepvtltd.com` / `Password123!`.
+It checks Docker, creates `.env` if missing, validates the Compose configuration **before**
+building anything, then runs `docker compose up -d --build`.
 
-## 6. Smoke test
+The first run builds four images: **5–15 minutes.** Later runs take seconds.
 
-1. `GET http://localhost:3000/health` → `{"status":"ok",…}` and
-   `GET http://localhost:3000/ready` → 200 with `"ready":true`.
-   **Both live at the ROOT, outside `/api/v1`.**
-2. `POST /api/v1/auth/login` returns an access token.
-3. Settings → Feature Flags → add a flag, toggle it → persists.
-4. Competencies → Categories → create a category, then a competency → a v1 draft
-   is auto-created; open Behaviour Indicators.
+`-NoBuild` skips the build. Use it only with a release package whose images you have loaded
+— otherwise you run whatever images already exist, possibly an older release unzipped
+elsewhere.
 
-## 7. Tests
+### 1.6 What database initialisation does
 
-```bash
-npm run typecheck    # api + web
-npm test             # 26 API integration tests  (needs a running, fully seeded stack)
-npm run test:ui      # 1 Playwright smoke test   (needs the Vite DEV server on :5173)
+`db-init` is a one-shot container that runs on every start and exits. Every step is
+idempotent, so there is no separate first-run command to remember. In order:
+
+1. Creates the `mock_sis` database alongside the main one.
+2. Applies `database/000_initial_schema.sql`, then `database/001_reconcile.sql`, and stamps
+   `schema_migrations`.
+3. Seeds the permission catalogue and the five system roles
+   (**Super Admin, HR/Admin, Manager, Employee, Viewer**).
+4. Bootstraps the tenant from `ORG_NAME` / `ORG_SLUG` / `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+5. Seeds demo content when `SEED_DEMO_DATA=true`.
+6. Pushes and seeds the Mock SIS schema.
+
+**There is no migration tool to run by hand.** The SQL is hand-maintained and applied on
+every start. `001_reconcile.sql` is additive and idempotent — 643 `IF NOT EXISTS`
+statements, and no `DROP`, `TRUNCATE`, `DELETE` or `SET NOT NULL`.
+
+### 1.7 Install the licence
+
+Full procedure in **`LICENSING.md`**. In short: sign in as the administrator, open
+**Licence** in the menu, paste the licence you were sent, press **Install licence**.
+
+### 1.8 Verify the deployment
+
+```powershell
+docker compose -f compose.yaml ps
 ```
 
-The UI test must run against `npm run dev:web` — `vite preview` does not carry
-the `/api/v1` proxy, so every API call 404s. `.github/workflows/ci.yml` runs the
-whole sequence and is the executable reference for a correct deployment.
+All six long-running containers should be `running`, and `e360-db-init` `exited (0)`.
 
-## 8. Notes
+```powershell
+curl http://localhost:3000/health          # liveness - 200 whenever the process is up
+curl http://localhost:3000/ready           # readiness - database, redis, schema version
+curl http://localhost:8080/                # web
+curl http://localhost:3100/api/v1/health   # Mock SIS - note it IS under /api/v1
+```
 
-- The backend sets a global prefix `api/v1`, with three exclusions mounted at the
-  root: `/health`, `/ready` and `/r/:code`. The Vite dev server proxies
-  `/api/v1`, `^/r/` and `^/qr` to port 3000 (path-boundary regexes, so `/reports`
-  is **not** proxied).
-- Permissions are data — `db:seed` inserts codes, `db:seed-roles` and
-  `bootstrap-tenant` grant them to the system roles. New modules add their
-  seeders to `apps/api/prisma/seed.ts`. After any upgrade that adds permissions,
-  re-run both and have users sign in again (permissions ride in the access token).
-- Authentication endpoints: `POST /auth/login` (returns either a session or
-  `{mfaRequired, mfaToken}`), `POST /auth/mfa/login`, `POST /auth/refresh`
-  (rotating; reuse of a rotated token revokes the whole chain), `POST /auth/logout`,
-  `GET /auth/me`, `POST /auth/password/change`, `POST /auth/mfa/{setup,enable,disable}`,
-  `GET /auth/mfa/status`, `GET/DELETE /auth/sessions`, `GET /auth/sso/:provider/start`,
-  `GET /auth/sso/callback`, `POST /auth/ldap/login`.
-- **Refresh tokens are opaque random strings, not JWTs** — 32 random bytes stored
-  as a SHA-256 hash in `refresh_tokens`. `JWT_REFRESH_SECRET` appears in the CI
-  workflow and the compose files but is read by **no code**.
-- MFA needs `MFA_ENCRYPTION_KEY` (64 hex). Password policy, lockout, captcha, SSO
-  providers and LDAP are configured per-org in the `configurations` table
-  (module `auth`) — keys `password_policy`, `lockout`, `captcha`, `sso`, `ldap`.
-  SSO/LDAP require real provider config to function; `ldapjs` is a runtime dep.
-- Communication providers are per-org config (module `communication`, keys
-  `email` SMTP, `sms` twilio/generic-HTTP, `whatsapp` meta/twilio/waha/mock,
-  `general` publicBaseUrl + webhookSecret) — all editable at runtime under
-  Communication → Providers, each with an enable/disable switch. See
-  `COMMUNICATION_SETUP.md`. A disabled channel or missing config is recorded as
-  `skipped`/error, not delivered. The delivery queue uses BullMQ when
-  `REDIS_HOST` is set and **falls back to inline delivery otherwise**. Short
-  links resolve at `/r/:code` (outside the API prefix). Runtime deps: `bullmq`,
-  `nodemailer`, `qrcode`.
-- **Inbound provider delivery webhooks are signature-verified and fail-closed.**
-  `POST /api/v1/communication/webhooks/:provider` requires
-  `X-Webhook-Signature: sha256=<hex>` (HMAC-SHA256 of the raw body) — with
-  `X-Hub-Signature-256` and `X-Twilio-Signature` accepted as aliases. An
-  organisation with **no** webhook secret configured cannot accept callbacks at
-  all, and every rejection returns an identical `401`; the real reason is written
-  to the log.
-- Tailwind 3 + hand-written shadcn primitives — do **not** run `npx shadcn add`
-  (its current CLI emits Tailwind v4).
+A healthy `/ready` reports `"status":"ok"` with `database: up`. `"degraded"` means Redis is
+down (delivery falls back to inline) **or** the applied schema version trails the build.
+Both are reported; neither stops the application.
 
-## 9. Network access from other devices (LAN, or a real host name)
+Then sign in at `PUBLIC_APP_URL` with organisation `care` and your `ADMIN_EMAIL`.
 
-`apps/web/vite.config.ts` sets `server.host: true`, so the Vite dev server binds
-`0.0.0.0` instead of loopback only. `http://localhost:5173` behaves exactly as
-before and `http://<LAN-IP>:5173` additionally works — no hard-coded address, so
-a changed DHCP lease needs no edit. Before this, the connection from a phone or a
-second laptop was simply refused, with no error logged anywhere.
+---
 
-On Windows, `./start-dev.ps1` detects the current LAN IPv4 address (preferring an
-interface that has a default gateway) and prints both the localhost and the LAN
-URLs after launching the three servers. On Linux/macOS, find it with
-`hostname -I` or `ipconfig getifaddr en0`.
+## Part 2 — Upgrade deployment
 
-The proxy targets inside `vite.config.ts` stay on `localhost` deliberately: they
-are resolved by the Vite process on the server machine, not by the visiting
-browser. The browser only ever requests a relative `/api/v1` path from whichever
-host served the page.
+> **The whole application is one release.** `e360-api`, `e360-web`, `e360-mock-sis` and
+> `e360-api-tools` are built, verified and rolled back **together**. An old web image with a
+> new API is not a state this process can produce.
 
-### The three settings that must agree
+### 2.1 Use the release script, not `start-docker.ps1`
 
-Opening `http://<LAN-IP>:5173` on another device usually needs nothing else — the
-page and the API share one origin through the dev proxy, so no CORS check
-happens. Beyond that, these three have to name the **same** address, the one the
-other device actually types:
+`start-docker.ps1` rebuilds images in place. Because `compose.yaml` pins **untagged** names
+(`image: e360-api`), the previous image becomes nameless — and a nameless image is deleted
+by `docker image prune`, `docker system prune` and Docker Desktop's **Clean up** button.
 
-| Setting | Where | What it controls |
+For a working installation you cannot afford to lose:
+
+```powershell
+.\ops\deploy-release.ps1
+```
+
+### 2.2 What it does, in order
+
+```
+1  PRE-FLIGHT    Docker running, .env present, compose config valid, >= 5 GB free
+                 -> nothing has changed yet; a failure here costs nothing
+
+2  IDENTIFY      which images the running containers are actually using
+
+3  BACK UP       pg_dump through the container  -> backups\db-<id>-prev.dump
+                 tag all four images            -> e360-*:<id>-prev
+                 write the manifest             -> releases\<id>-prev\manifest.json
+                 -> if this fails, the deployment STOPS. Nothing destructive has run
+
+4  BUILD         docker compose build
+                 -> does NOT touch running containers. A failure leaves the
+                    application serving on the previous release
+
+5  START         docker compose up -d
+
+6  HEALTH        wait for postgres, redis, api, web, mock-sis to report healthy
+                 confirm db-init exited 0
+
+7  SMOKE         /health, /ready, web /, mock-sis /api/v1/health,
+                 SELECT count(*) FROM employees
+
+8  SUCCESS       tag the new images, write the manifest, mark it current,
+                 apply retention (5 releases by default)
+
+9  FAILURE       restore the previous release automatically, as a complete set
+```
+
+Switches: `-Keep N` (retention), `-Timeout N` (health wait, default 180s),
+`-SkipDbBackup`, `-WhatIfDeploy` (back up and stop, changing nothing else).
+
+### 2.3 Pre-deployment checklist
+
+- [ ] Read the release notes for schema or configuration changes
+- [ ] At least 10 GB free disk
+- [ ] Know which release is current: `.\ops\rollback.ps1 -List`
+- [ ] Full backup taken if this is production (`ops\BACKUP_RESTORE.md`)
+- [ ] Users told — the stack is briefly unavailable during step 5
+- [ ] Licence to hand if the edition or expiry is changing
+
+### 2.4 What happens if it fails
+
+| Fails at | Result |
+|---|---|
+| Pre-flight | Nothing changed. Application still serving |
+| Backup | **Deployment stops.** Nothing changed |
+| Build | Application still serving on the previous release; previous tags intact |
+| Health or smoke | **Automatic rollback** to the release captured in step 3 |
+| The rollback itself | Reported explicitly, with the manifest path and the manual commands |
+
+The dump taken in step 3 is **never restored automatically** — that would discard everything
+written since. Its path is printed so you can restore it deliberately.
+
+---
+
+## Part 3 — Rollback
+
+### 3.1 When to roll back
+
+- The new release fails health or smoke checks (this happens automatically)
+- A defect appears after deployment that is worse than the problem you were fixing
+- A configuration or licence change has made the application unusable
+
+**Do not roll back to escape a data problem.** Image rollback restores code, not data.
+
+### 3.2 Find the previous known-good release
+
+```powershell
+.\ops\rollback.ps1 -List
+```
+
+```
+RELEASE                CREATED               VERIFIED   IMAGES
+2026-09-01-1420        2026-09-01T14:20:03Z  yes        4/4
+2026-09-02-0930        2026-09-02T09:30:11Z  yes        4/4  <- current
+```
+
+**A release showing fewer than 4/4 cannot be rolled back to**, and is listed in red.
+
+### 3.3 Restore
+
+```powershell
+.\ops\rollback.ps1 -Previous                    # one release back
+.\ops\rollback.ps1 -Release 2026-09-01-1420     # a specific one
+```
+
+You are asked to type the release id to confirm (`-Force` skips this). Then:
+
+1. **Verifies every image exists.** If any is missing it aborts **before** stopping
+   anything, and the application keeps serving.
+2. `docker compose down` — containers only; **volumes are not touched**.
+3. Re-points all four image names from the **one** manifest.
+4. `docker compose up -d --no-build`.
+5. Waits for health and re-runs the smoke checks.
+
+### 3.4 Verify the rollback
+
+```powershell
+docker compose -f compose.yaml ps
+curl http://localhost:3000/ready
+```
+
+Then sign in and confirm the behaviour you rolled back to is the behaviour you get.
+
+### 3.5 What rollback does NOT restore
+
+| | Restored? |
+|---|---|
+| Application code (all four images) | **Yes** |
+| PostgreSQL data (`pgdata`) | **No** |
+| Redis queue (`redisdata`) | No |
+| WhatsApp session (`waha_sessions`, `waha_media`) | No |
+| `.env` and its secrets | No |
+| The installed licence | No — it lives in PostgreSQL and does not need to be |
+
+### 3.6 Database migration considerations
+
+**Schema changes are forward-only.** Nothing reverses them.
+
+Today this is safe: `001_reconcile.sql` is additive and idempotent, so rolled-back code runs
+against a database with extra columns it simply ignores. After a rollback `/ready` reports
+**`degraded`** with a schema mismatch — expected, and not a failure, because readiness is
+gated on the database being *up*, not on the schema matching.
+
+> **WARNING.** The moment a release drops a column, renames one, or adds `NOT NULL` without
+> a default, image rollback alone stops being sufficient. That is what the pre-deployment
+> dump is for. Restoring it discards everything written since it was taken, so it is a
+> deliberate decision — see `ops\BACKUP_RESTORE.md`.
+
+---
+
+## Part 4 — Docker architecture
+
+```
+Enterprise 360 (compose project "e360")
+    |
+    +-- APPLICATION IMAGES  (built here; versioned and rolled back as ONE release)
+    |     e360-web          nginx + the built SPA
+    |     e360-api          the NestJS API
+    |     e360-mock-sis     standalone vendor SIS simulator
+    |     e360-api-tools    db-init: applies the SQL, runs the seed chain
+    |
+    +-- UPSTREAM IMAGES     (never built here, never rolled back)
+    |     postgres:16-alpine
+    |     redis:7-alpine
+    |     devlikeapro/waha:latest
+    |
+    +-- PERSISTENT DATA     (survives every deployment and every rollback)
+          pgdata          everything: organisations, employees, cycles, scores, licence
+          redisdata       BullMQ delivery queue
+          waha_sessions   the linked WhatsApp session
+          waha_media      WhatsApp media
+```
+
+**There is no separate worker service.** BullMQ runs in-process inside the API and falls
+back to inline delivery when Redis is unavailable.
+
+### Services
+
+| Service | Image | Container | Host port | Depends on | Health check |
+|---|---|---|---|---|---|
+| postgres | `postgres:16-alpine` | `e360-postgres` | 5432 | — | `pg_isready` |
+| redis | `redis:7-alpine` | `e360-redis` | not published | — | `redis-cli ping` |
+| db-init | `e360-api-tools` | `e360-db-init` | — | postgres healthy | none — one-shot, judged by exit code |
+| api | `e360-api` | `e360-api` | 3000 | postgres + redis healthy, db-init completed | `GET /health` |
+| web | `e360-web` | `e360-web` | 8080 | api started | `wget /` |
+| mock-sis | `e360-mock-sis` | `e360-mock-sis` | 3100 | postgres healthy, db-init completed | `GET /api/v1/health` |
+| waha | `devlikeapro/waha:latest` | `e360-waha` | 3001 | — | `wget /ping`, 90s start period |
+
+Network: one bridge network, `e360`. **Inside Docker, services address each other by service
+name, never `localhost`** — the API reaches `postgres:5432`, `redis:6379`, `mock-sis:3100`
+and `waha:3000`; nginx proxies `/api/v1` to `api:3000`.
+
+### Images versus data
+
+| Docker images hold | Volumes and configuration hold |
+|---|---|
+| Application code | All business data |
+| Node dependencies | The installed licence |
+| The compiled SPA | Uploaded content |
+| The SQL migration files | The linked WhatsApp session |
+| The compiled licence verification key | Every secret in `.env` |
+
+Rebuilding images never touches data. Restoring images never restores data.
+
+---
+
+## Part 5 — Backup
+
+Full runbook: `ops\BACKUP_RESTORE.md`. Before a production upgrade, back up **all four**:
+
+| # | What | How |
 |---|---|---|
-| `CORS_ORIGIN` | `apps/api/.env` | The browser origin the API accepts cross-origin calls from. Needed only when a device calls the API **directly** on `:3000`, bypassing the dev proxy. |
-| `PUBLIC_APP_URL` | `apps/api/.env` | The base for links the system **generates** — password-reset emails, parent-evaluation links, QR codes. |
-| The API host | — | The API must be reachable at that same host name/IP on `:3000`. |
+| 1 | **Application images** | `ops\deploy-release.ps1` does this automatically (tags + manifest) |
+| 2 | **Database** | `ops\backup.ps1`, or the automatic pre-deployment dump |
+| 3 | **Volumes** | `waha_sessions` if WhatsApp is linked — otherwise a QR re-scan is needed |
+| 4 | **Configuration** | **Copy `.env` somewhere safe.** It is gitignored and irreplaceable |
 
-- **`CORS_ORIGIN`** — an explicit value always wins, so a configured deployment
-  is unaffected. Unset (or blank) in development, the API reflects the caller's
-  origin; unset in production it falls back to `http://localhost:5173`. Do not
-  leave it as an empty string in a config-managed environment: an empty string is
-  treated as "not set" by the API, but a literal `CORS_ORIGIN=` handed to a
-  process manager that keeps it verbatim would match no origin at all and make
-  every preflight fail with what looks like a routing bug.
-- **`PUBLIC_APP_URL`** — defaults to `http://localhost:5173`. Left there, every
-  recipient gets a link that only opens on the server itself. Set it to
-  e.g. `http://192.168.1.20:5173` for LAN testing, or to the real public URL in
-  production. Per-tenant, **Communication → Providers → General → Public base
-  URL** (`general.publicBaseUrl`) overrides it; `PUBLIC_APP_URL` is the fallback
-  when a tenant has not set one. See `COMMUNICATION_SETUP.md`.
+---
 
-If the page does not load at all from the other device, the port is being blocked
-before any of this matters — check the host firewall (`Test-NetConnection
--ComputerName <IP> -Port 5173` on Windows).
+## Part 6 — Troubleshooting
 
-## Database schema updates (existing installs)
+| Symptom | Cause | Fix |
+|---|---|---|
+| `up` fails citing `JWT_ACCESS_SECRET` or `MFA_ENCRYPTION_KEY` | `.env` missing or the secret is blank | `.\ops\init-env.ps1` |
+| `WAHA_DASHBOARD_PASSWORD` error | Same | Same |
+| Web loads, every API call fails | API not healthy | `docker compose logs api --tail 50` |
+| Application loads but is empty | `db-init` failed | `docker compose logs db-init`, then `docker compose run --rm db-init` |
+| No demo data although `SEED_DEMO_DATA=true` | The volume was seeded by an older build; the marker guard keeps the old data | `docker compose run --rm -e DEMO_RESEED=true db-init` |
+| Feedback links contain `localhost` | `PUBLIC_APP_URL` not set | Set it in `.env`, then `docker compose up -d` — recreates the API, no rebuild |
+| Licence page reports no verification key | The build carries no trusted key | See `LICENSING.md`. On a release build this means the build is faulty — contact the supplier |
+| "Found multiple config files" warning | Both `compose.yaml` and `docker-compose.yml` exist | Harmless. The scripts pin `-f compose.yaml` |
+| `NativeCommandError` from a `.ps1` | Windows PowerShell promotes Docker's stderr to an error | Already handled in the shipped scripts. Do not add `$ErrorActionPreference = 'Stop'` |
+| Changes did not take effect | Ran with `-NoBuild`, or an image of the same name exists from another folder | Re-run without `-NoBuild` |
+| WAHA unhealthy for the first minute | It boots a browser engine (90s start period) | Wait. It is excluded from the deployment health gate for this reason |
 
-There is **no Prisma Migrate history and none must be created.** The base DDL in
-`database/000_initial_schema.sql` only creates tables on a **fresh** database;
-new columns/tables reach an existing one through the **idempotent, additive**
-`database/001_reconcile.sql`, which also stamps `schema_migrations`.
+```powershell
+docker compose -f compose.yaml ps
+docker compose -f compose.yaml logs -f api
+docker compose -f compose.yaml logs db-init
+docker compose -f compose.yaml restart api
+docker compose -f compose.yaml down          # stops; KEEPS data
+```
 
-- `./deploy.ps1` detects an existing schema, skips the base DDL, and always runs
-  the reconcile — so re-running deploy brings an old database fully up to date.
-- Manually: `npm run db:reconcile` (Docker Postgres), or
-  `psql -U postgres -d enterprise360 -v ON_ERROR_STOP=1 -f database/001_reconcile.sql`.
-- Never run `prisma migrate dev`, `prisma migrate deploy` or `prisma db push`
-  against `enterprise360`. (`prisma db push` is used **only** for the Mock SIS
-  database, by `npm run sis:push`.)
-- Verify afterwards: `curl -s http://localhost:3000/ready` — `checks.schema`
-  compares the applied version with the one this build expects.
+> **WARNING — `docker compose down -v` deletes every volume**, including the database and
+> the WhatsApp session. There is no undo, and it is never part of a normal deployment.
 
-**Symptom this fixes:** `db:sample` or the API failing with
-`PrismaClientKnownRequestError … The column "…" does not exist` (P2022) — the
-database predates a column a newer build expects. Run the reconcile (or re-run
-`./deploy.ps1`) and retry. The reconcile is additive and safe to run repeatedly;
-it never drops data or alters the partial (soft-delete) unique indexes.
+---
 
-The Mock SIS has its own database (`mock_sis`); set it up with `npm run sis:setup`
-(run from the repo **root** — the `sis:*` scripts are defined there, not in
-`apps/mock-sis`). `./deploy.ps1` does this automatically.
+## Appendix — development from source
 
-Upgrades: see `ops/UPGRADE.md`. Backup/restore: see `ops/BACKUP_RESTORE.md`.
-Containers: see `ops/README-docker.md`.
+Not a deployment path. `README.md` has the full sequence; in short:
+
+```powershell
+npm install
+npm run db:up            # PostgreSQL + Redis only (docker-compose.yml)
+npm run db:apply         # schema + reconcile
+npm run db:seed
+npm run -w apps/api db:bootstrap-tenant -- --org "CARE Pvt. Ltd." --slug care --email admin@carepvtltd.com --password 'ChangeThisNow!'
+npm run db:seed-roles
+.\start-dev.ps1
+```
+
+> **Note the `-w apps/api`.** The root `db:bootstrap-tenant` script is itself an `npm run`,
+> and the second npm hop swallows everything after `--` as npm configuration — the
+> administrator is then created with the default password and no error.
+
+A development build carries the built-in development licence (all modules, unlimited
+employees), labelled as such in the UI. See `LICENSING.md` §4.

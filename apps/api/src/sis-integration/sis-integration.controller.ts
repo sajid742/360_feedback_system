@@ -55,11 +55,23 @@ export class SisIntegrationController {
   @Post('test')
   test(@CurrentUser() user: AuthUser) { return this.sync.test(user.organizationId); }
 
-  /** Excel/CSV import — dry-run (validate/preview) or confirm (write). */
+  /**
+   * Excel/CSV import — dry-run by default; live when `{ dryRun:false }`.
+   * A live import that would deactivate or rename records, or re-point a teacher to a
+   * different 360 employee, returns the PREVIEW with `requiresConfirmation: true`
+   * instead of writing; re-send it with `{ confirm:true }` to apply. A harmless
+   * import applies immediately.
+   */
   @Post('import')
   import(@CurrentUser() user: AuthUser, @Body() dto: SisImportDto) {
     const actor = { userId: user.userId, name: user.email };
-    return this.sync.importFile(user.organizationId, actor, { filename: dto.filename, base64: dto.base64, entity: dto.entity }, dto.dryRun !== false);
+    return this.sync.importFile(
+      user.organizationId,
+      actor,
+      { filename: dto.filename, base64: dto.base64, entity: dto.entity },
+      dto.dryRun !== false,
+      dto.confirm === true,
+    );
   }
 
   /**

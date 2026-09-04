@@ -25,7 +25,16 @@ export interface SisApplyResult {
   rename: { code: string; from: string; to: string }[];
   /** Locally added or locally corrected records the feed was NOT allowed to touch. */
   preserved: { code: string; name: string | null; reason: 'manual' | 'edited'; fields?: string[] }[];
-  /** True when this run would deactivate or rename records. A live run needs `confirm`. */
+  /**
+   * Teacher → 360 employee mappings this run would point at a DIFFERENT employee,
+   * because the feed gave an already-mapped teacher another `employee_code`.
+   *
+   * Feedback already collected is unaffected — every evaluation link stores the
+   * `employee_id` it resolved at generation — but from here on, parent feedback for
+   * that teacher would score somebody else. That is significant enough to confirm.
+   */
+  repoint: { code: string; name: string | null; from: string; to: string }[];
+  /** True when this run would deactivate, rename, or re-point. A live run needs `confirm`. */
   significant: boolean;
   /** Set when a live run was withheld because `significant` and `confirm` was not sent. */
   requiresConfirmation?: boolean;
@@ -219,6 +228,52 @@ export class SisSyncService {
     return mapped;
   }
 
+  /**
+   * Which teacher→employee mappings `autoMapTeachers` WOULD move to a different
+   * employee. Read-only: this runs before the confirmation gate so the preview can
+   * itemise the change, and it writes nothing.
+   *
+   * Only an existing mapping that resolves to a DIFFERENT employee counts. A first
+   * mapping is not a re-point, and a teacher whose `employee_code` matches no employee
+   * is skipped here exactly as `autoMapTeachers` skips it.
+   */
+  private async teacherRepoints(orgId: string, snapshot: SisSnapshot): Promise<SisApplyResult['repoint']> {
+    const teachers = snapshot.teachers.filter((t) => !!t.employeeCode);
+    if (teachers.length === 0) return [];
+
+    const emps = await this.prisma.employee.findMany({
+      where: { organizationId: orgId, employeeCode: { in: teachers.map((t) => t.employeeCode) }, deletedAt: null },
+      select: { id: true, employeeCode: true },
+    });
+    const targetByCode = new Map(emps.map((e) => [e.employeeCode, e.id]));
+
+    const existing = await this.prisma.externalIdentityMap.findMany({
+      where: { organizationId: orgId, externalType: TEACHER_EXTERNAL_TYPE, externalId: { in: teachers.map((t) => t.id) } },
+      select: { externalId: true, employeeId: true },
+    });
+    const mappedTo = new Map(existing.map((m) => [m.externalId, m.employeeId]));
+
+    const moving: { teacher: SisTeacher; from: string; to: string }[] = [];
+    for (const t of teachers) {
+      const to = targetByCode.get(t.employeeCode);
+      const from = mappedTo.get(t.id);
+      if (!to || !from || from === to) continue;
+      moving.push({ teacher: t, from, to });
+    }
+    if (moving.length === 0) return [];
+
+    // Report employee CODES, not UUIDs — an administrator cannot act on a UUID.
+    const ids = [...new Set(moving.flatMap((m) => [m.from, m.to]))];
+    const named = await this.prisma.employee.findMany({ where: { id: { in: ids } }, select: { id: true, employeeCode: true } });
+    const codeById = new Map(named.map((e) => [e.id, e.employeeCode]));
+    return moving.map((m) => ({
+      code: m.teacher.employeeCode || m.teacher.id,
+      name: m.teacher.name,
+      from: codeById.get(m.from) ?? m.from,
+      to: codeById.get(m.to) ?? m.to,
+    }));
+  }
+
   /** Pull a snapshot from a live provider (mock/generic/oneroster). */
   private async snapshotFromProvider(orgId: string, provider: string, mockScenario: string): Promise<SisSnapshot> {
     const p = this.registry.get(provider);
@@ -247,7 +302,7 @@ export class SisSyncService {
         organizationId: orgId, provider, mode, trigger, status,
         createdBy: actor.userId, createdByName: actor.name,
         created: res.counts.created, updated: res.counts.updated, deactivated: res.counts.deactivated, failed: 0, warnings: res.warnings.length,
-        summary: { counts: res.counts, entityCounts: res.entityCounts, deactivate: res.deactivate, errors: res.errors, warnings: res.warnings, verify: res.verify } as unknown as Prisma.InputJsonValue,
+        summary: { counts: res.counts, entityCounts: res.entityCounts, deactivate: res.deactivate, rename: res.rename, repoint: res.repoint, errors: res.errors, warnings: res.warnings, verify: res.verify } as unknown as Prisma.InputJsonValue,
         finishedAt: new Date(),
       },
     });
@@ -258,11 +313,14 @@ export class SisSyncService {
   private async apply(orgId: string, actor: { userId: string | null; name: string | null }, provider: string, incoming: SisSnapshot, opts: { dryRun: boolean; trigger?: 'manual' | 'scheduled'; confirm?: boolean; errors?: SisValidationIssue[]; warnings?: SisValidationIssue[] }): Promise<SisApplyResult> {
     const existing = await this.dataset.get(orgId);
     const { merged, counts, deactivate, rename, preserved } = this.reconcile(existing, incoming);
+    // Computed BEFORE the gate so a re-point can be previewed and confirmed rather
+    // than happening silently inside autoMapTeachers after the write.
+    const repoint = await this.teacherRepoints(orgId, merged);
     const entityCounts = { students: incoming.students.length, guardians: incoming.parents.length, teachers: incoming.teachers.length, teachingAssignments: incoming.teachingAssignments.length, enrollments: incoming.enrollments.length };
     const res: SisApplyResult = {
       mode: opts.dryRun ? 'dry_run' : 'live', provider, ok: (opts.errors?.length ?? 0) === 0,
-      counts, entityCounts, deactivate, rename, preserved,
-      significant: deactivate.length > 0 || rename.length > 0,
+      counts, entityCounts, deactivate, rename, preserved, repoint,
+      significant: deactivate.length > 0 || rename.length > 0 || repoint.length > 0,
       errors: opts.errors ?? [], warnings: opts.warnings ?? [],
     };
     if (opts.dryRun || !res.ok) {
@@ -277,7 +335,12 @@ export class SisSyncService {
      * (S1001–S1004) against a seeded 120-student roster does exactly that. A
      * destructive run is now withheld and the preview returned instead, so the
      * administrator sees WHAT would change before it changes. A harmless sync — no
-     * deactivations, no renames — still applies in one step and asks nothing.
+     * deactivations, no renames, no re-points — still applies in one step and asks
+     * nothing.
+     *
+     * This gate serves BOTH entry points. The file-import path used to call `apply()`
+     * without `confirm`, so `!opts.confirm` was permanently true and any significant
+     * import returned the preview forever with no way to complete it.
      */
     if (res.significant && !opts.confirm) {
       res.mode = 'dry_run';
@@ -298,12 +361,12 @@ export class SisSyncService {
 
   /* ------------------------------ Excel/CSV import ------------------------------ */
 
-  async importFile(orgId: string, actor: { userId: string | null; name: string | null }, input: SisParseInput, dryRun: boolean): Promise<SisApplyResult> {
+  async importFile(orgId: string, actor: { userId: string | null; name: string | null }, input: SisParseInput, dryRun: boolean, confirm = false): Promise<SisApplyResult> {
     const rows = await this.parser.parseAsync(input);
     const validation = validateRows(rows);
     const provider = (await this.config.get(orgId)).provider === 'mock' ? 'csv' : (await this.config.get(orgId)).provider;
     const incoming = buildSnapshot(rows);
-    return this.apply(orgId, actor, ['internal', 'csv'].includes(provider) ? provider : 'csv', incoming, { dryRun, errors: validation.errors, warnings: validation.warnings });
+    return this.apply(orgId, actor, ['internal', 'csv'].includes(provider) ? provider : 'csv', incoming, { dryRun, confirm, errors: validation.errors, warnings: validation.warnings });
   }
 
   /* ------------------------------ Provider sync ------------------------------ */
@@ -350,12 +413,21 @@ export class SisSyncService {
   async reportCsv(orgId: string, runId: string): Promise<string> {
     const run = await this.prisma.sisSyncRun.findFirst({ where: { id: runId, organizationId: orgId } });
     if (!run) return 'Severity,Entity,Row,Field,Key,Message\n';
-    const s = (run.summary ?? {}) as { errors?: SisValidationIssue[]; warnings?: SisValidationIssue[]; deactivate?: { code: string; name: string | null }[] };
+    const s = (run.summary ?? {}) as {
+      errors?: SisValidationIssue[];
+      warnings?: SisValidationIssue[];
+      deactivate?: { code: string; name: string | null }[];
+      rename?: { code: string; from: string; to: string }[];
+      repoint?: { code: string; name: string | null; from: string; to: string }[];
+    };
     const esc = (v: unknown) => { const str = v == null ? '' : String(v); return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str; };
     const lines = ['Severity,Entity,Row,Field,Key,Message'];
     for (const e of s.errors ?? []) lines.push(['error', e.entity, e.row, e.field, e.key, e.message].map(esc).join(','));
     for (const w of s.warnings ?? []) lines.push(['warning', w.entity, w.row, w.field, w.key, w.message].map(esc).join(','));
     for (const d of s.deactivate ?? []) lines.push(['deactivated', '', '', '', d.code, `No longer in SIS — deactivated: ${d.name ?? d.code}`].map(esc).join(','));
+    for (const r of s.rename ?? []) lines.push(['renamed', 'students', '', 'name', r.code, `Renamed: ${r.from} → ${r.to}`].map(esc).join(','));
+    // Older runs have no `repoint` in their summary; `?? []` keeps their reports valid.
+    for (const r of s.repoint ?? []) lines.push(['repointed', 'teachers', '', 'employee_code', r.code, `Teacher ${r.name ?? r.code} re-pointed from employee ${r.from} to ${r.to} — future parent feedback scores the new employee.`].map(esc).join(','));
     return lines.join('\n');
   }
 

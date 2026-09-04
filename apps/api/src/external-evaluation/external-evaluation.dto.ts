@@ -34,6 +34,13 @@ export class CreateEvaluationLinkDto {
 export class SendEvaluationLinkDto {
   @IsOptional() @IsIn(CHANNELS) channel?: (typeof CHANNELS)[number];
   @IsOptional() @IsString() recipient?: string;
+  /**
+   * Regenerate only. Re-issuing a link DISCARDS the responses, score and comment
+   * already submitted against it and resets the linked reviewer assignments. On a
+   * link the parent has already completed that destroys collected feedback, so it
+   * is refused unless this is explicitly sent.
+   */
+  @IsOptional() @IsBoolean() force?: boolean;
 }
 
 export class EvaluationResponseItemDto {

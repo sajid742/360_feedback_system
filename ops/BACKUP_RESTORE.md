@@ -1,8 +1,75 @@
-# Enterprise 360 — Backup & Restore Runbook (F21)
+# Enterprise 360 — Backup & Restore Runbook
 
-Product-grade, scripted, scheduled, and **tested** backup/restore for the
-Enterprise 360 database and the secrets required to read it back. Replaces the
-"run `pg_dump` yourself" note in the Deployment Manual.
+Scripted, scheduled and tested backup/restore for the Enterprise 360 database and the
+secrets required to read it back.
+
+---
+
+## 0. What must be backed up — four separate things
+
+Restoring one does not restore the others. Before a production upgrade, cover all four.
+
+| # | Category | Where it lives | How to back it up | Restored by an image rollback? |
+|---|---|---|---|---|
+| 1 | **Application images** | Docker image store | `ops\deploy-release.ps1` tags all four and writes a manifest, automatically | **Yes** — that is what a rollback restores |
+| 2 | **Database** | `pgdata` volume — organisations, employees, cycles, responses, scores, **and the installed licence** | `ops\backup.ps1`, or the automatic pre-deployment dump | **No** |
+| 3 | **Volumes** | `waha_sessions`, `waha_media` (WhatsApp), `redisdata` (queue) | `docker run --rm -v waha_sessions:/v -v "${PWD}:/out" alpine tar czf /out/waha.tgz /v` | **No** |
+| 4 | **Configuration** | `.env` at the repository root | **Copy it somewhere safe.** It is gitignored and irreplaceable | **No** |
+
+> ### WARNING — `MFA_ENCRYPTION_KEY` is part of your backup
+> It encrypts stored HR/SIS provider credentials and MFA seeds. A database restored
+> **without the matching key cannot decrypt them** — every row returns, but HR/SIS syncs
+> and MFA break. Keep `.env` with the dump, treat the pair as secret, and take a fresh
+> backup immediately after rotating the key.
+
+Losing `redisdata` costs at most in-flight notifications. Losing `waha_sessions` means
+re-scanning the WhatsApp QR code. Losing `pgdata` or `.env` is unrecoverable.
+
+---
+
+## 1. Docker deployments — taking a database backup
+
+Two options. **Both produce the same `pg_dump -Fc` custom-format dump**, which
+`ops\restore.ps1` and `pg_restore` both accept.
+
+**Automatic, on every upgrade** — no action needed:
+
+```powershell
+.\ops\deploy-release.ps1        # step 3 writes backups\db-<release>-prev.dump
+```
+
+**On demand, through the container** — needs nothing but Docker:
+
+```powershell
+docker compose -f compose.yaml exec -T postgres pg_dump -Fc -U postgres -d enterprise360 -f /tmp/e360.dump
+docker compose -f compose.yaml cp postgres:/tmp/e360.dump .\backups\e360-manual.dump
+docker compose -f compose.yaml exec -T postgres rm -f /tmp/e360.dump
+```
+
+> **Note.** `ops/backup.ps1` and `ops/backup.sh` below call `pg_dump` on the **host**, so
+> they need PostgreSQL client tools installed. That is fine on a development machine and
+> often wrong on a customer server that has only Docker Desktop. Use the container method
+> there.
+
+### Restoring into a Docker deployment
+
+```powershell
+docker compose -f compose.yaml cp .\backups\e360-manual.dump postgres:/tmp/restore.dump
+docker compose -f compose.yaml exec -T postgres pg_restore -U postgres -d enterprise360 --clean --if-exists /tmp/restore.dump
+docker compose -f compose.yaml restart api
+```
+
+> ### WARNING — restoring discards everything written since the dump
+> There is no merge. Restore only when the data itself is wrong, and never as a routine
+> part of a rollback. An image rollback alone is usually the right action; see
+> `ops/RELEASES.md`.
+
+---
+
+## 2. From-source deployments
+
+Everything below applies to the from-source workflow, where the API runs on the host and
+reads `apps/api/.env`.
 
 ## What gets backed up
 

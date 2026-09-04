@@ -23,7 +23,12 @@ export interface SisApplyResult {
   deactivate: { code: string; name: string | null }[];
   rename: { code: string; from: string; to: string }[];
   preserved: { code: string; name: string | null; reason: 'manual' | 'edited'; fields?: string[] }[];
-  /** True when this run would deactivate or rename records. */
+  /**
+   * Teacher → 360 employee mappings this run would move to a DIFFERENT employee.
+   * Optional: runs recorded before this existed have no `repoint` in their summary.
+   */
+  repoint?: { code: string; name: string | null; from: string; to: string }[];
+  /** True when this run would deactivate, rename, or re-point. */
   significant: boolean;
   /** Set when a live run was withheld pending confirmation — nothing was written. */
   requiresConfirmation?: boolean;
@@ -46,7 +51,7 @@ export const sisApi = {
   saveConnection: (provider: string, settings: Record<string, unknown>): Promise<RedactedConnection> => apiClient.put('/sis-integration/connection', { provider, settings }),
   testConnection: (): Promise<TestResult> => apiClient.post('/sis-integration/test', {}),
   sync: (live: boolean, confirm = false): Promise<SisApplyResult> => apiClient.post('/sis-integration/sync', { live, confirm }),
-  import: (body: { filename: string; base64: string; entity?: string; dryRun: boolean }): Promise<SisApplyResult> => apiClient.post('/sis-integration/import', body),
+  import: (body: { filename: string; base64: string; entity?: string; dryRun: boolean; confirm?: boolean }): Promise<SisApplyResult> => apiClient.post('/sis-integration/import', body),
   downloadTemplate: (): Promise<void> => apiClient.download('/sis-integration/template', 'sis-import-template.xlsx'),
   downloadReport: (runId: string): Promise<void> => apiClient.download(`/sis-integration/${runId}/report`, 'sis-sync-report.csv'),
 };

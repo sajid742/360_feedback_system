@@ -111,6 +111,8 @@ function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
   const [channel, setChannel] = useState<'whatsapp' | 'email' | 'sms'>('whatsapp');
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; url?: string } | null>(null);
+  /** Link id armed for a destructive re-issue — see `regenerate`. */
+  const [confirmDiscard, setConfirmDiscard] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Which parent feedback mode the target cycle is configured for. Drives whether this
   // panel offers one link per teacher or one consolidated link for the whole student.
@@ -213,15 +215,29 @@ function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
     }
   }
 
+  /**
+   * Re-issuing a link the parent has ALREADY submitted discards their responses and
+   * score, so the API refuses it unless `force` is sent. Rather than surfacing that as
+   * a dead-end error, the first click arms the row and the second confirms — the same
+   * two-click pattern the SIS sync uses for a destructive run.
+   */
   async function regenerate(id: string): Promise<void> {
+    const force = confirmDiscard === id;
     setBusy(id);
     setError(null);
     try {
-      const link = await evalAdminApi.regenerate(id, { channel });
+      const link = await evalAdminApi.regenerate(id, { channel, force: force || undefined });
+      setConfirmDiscard(null);
       setNotice({ text: `New link issued and re-sent via ${link.sent?.channel ?? channel}.`, url: link.url });
       reloadLinks();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not regenerate.');
+      if (err instanceof ApiError && /already been submitted/i.test(err.message)) {
+        setConfirmDiscard(id);
+        setError('This parent has already submitted. Re-issuing permanently discards their responses and score. Click "Discard & resend" to confirm, or leave it alone to keep the feedback.');
+      } else {
+        setConfirmDiscard(null);
+        setError(err instanceof ApiError ? err.message : 'Could not regenerate.');
+      }
     } finally {
       setBusy(null);
     }
@@ -433,8 +449,16 @@ function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
                     <td className="p-3 text-xs text-muted-foreground">{l.completedAt ? new Date(l.completedAt).toLocaleDateString() : '—'}</td>
                     <td className="p-3">
                       <div className="flex justify-end gap-2">
-                        <Button size="sm" variant="outline" disabled={busy !== null || l.status === 'revoked'} onClick={() => regenerate(l.id)} title="Issue a fresh link and re-send">
-                          <RefreshCw /> Resend
+                        <Button
+                          size="sm"
+                          variant={confirmDiscard === l.id ? 'destructive' : 'outline'}
+                          disabled={busy !== null || l.status === 'revoked'}
+                          onClick={() => regenerate(l.id)}
+                          title={confirmDiscard === l.id
+                            ? 'Discards the responses and score already submitted, then issues a fresh link'
+                            : 'Issue a fresh link and re-send'}
+                        >
+                          <RefreshCw /> {confirmDiscard === l.id ? 'Discard & resend' : 'Resend'}
                         </Button>
                         <Button size="sm" variant="outline" disabled={busy !== null || l.status === 'revoked'} onClick={() => revoke(l.id)}>
                           <Ban /> Revoke

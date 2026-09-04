@@ -188,6 +188,21 @@ export class EvaluationLinkService {
     // behind for an administrator to clean up.
     await this.baseUrl(user.organizationId);
     const row = await this.owned(user.organizationId, id);
+    /*
+     * Re-issuing clears responses, overallScore and comment and resets every linked
+     * reviewer assignment. On a link the parent has ALREADY submitted, that is the
+     * deletion of collected feedback — irreversible, and not what someone clicking
+     * "resend" expects. Refuse unless it is asked for explicitly.
+     *
+     * Both submission paths (`submit` and `submitConsolidated`) set `status` and
+     * `completedAt` together; `completedAt` is checked as well so a row left
+     * inconsistent by an older build still counts as answered.
+     */
+    if ((row.status === 'completed' || row.completedAt !== null) && dto.force !== true) {
+      throw new BadRequestException(
+        'This link has already been submitted. Re-issuing it permanently discards the responses and score already recorded and resets the reviewer assignment. Send force: true to do that deliberately.',
+      );
+    }
     const token = randomBytes(24).toString('base64url');
     const updated = await this.prisma.evaluationLink.update({
       where: { id: row.id },
@@ -207,7 +222,8 @@ export class EvaluationLinkService {
       organizationId: user.organizationId,
       actorUserId: user.userId,
       actorName: user.email,
-      newValue: { resent: !!(dto.channel || dto.recipient), channel: sent?.channel ?? null },
+      // `discardedSubmission` records the one case where re-issuing destroyed data.
+      newValue: { resent: !!(dto.channel || dto.recipient), channel: sent?.channel ?? null, discardedSubmission: dto.force === true },
       ctx: ctx ?? null,
     });
     const fresh = await this.prisma.evaluationLink.findUnique({ where: { id: row.id } });

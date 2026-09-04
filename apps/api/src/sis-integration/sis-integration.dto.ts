@@ -30,4 +30,14 @@ export class SisImportDto {
   @IsOptional() @IsString() @MaxLength(40) entity?: string;
   /** true = validate/preview only (no writes). */
   @IsOptional() @IsBoolean() dryRun?: boolean;
+  /**
+   * Acknowledges an import that would deactivate or rename records, or re-point a
+   * teacher to a different 360 employee. A live import WITHOUT this returns the
+   * preview instead of writing — the same gate the provider sync uses.
+   *
+   * Before this existed the import path never sent a confirmation, so `apply()`
+   * withheld every significant run forever: a workbook that dropped a leaver or
+   * corrected a name could be previewed but never applied.
+   */
+  @IsOptional() @IsBoolean() confirm?: boolean;
 }

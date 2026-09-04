@@ -189,6 +189,49 @@ export function validateRows(rows: SisRawRows): SisValidationResult {
     if (!g(r, 'parentMobile') && !g(r, 'parentWhatsapp') && !g(r, 'parentEmail')) warnings.push({ entity: 'students', row: i + 1, field: 'parent', key: id, message: 'No parent contact — parent feedback cannot be sent for this student unless a Guardian row provides one.' });
   });
 
+  /*
+   * Academic structure is keyed on the trimmed display name (see `refList` above),
+   * so "BSCS-1", "bscs-1" and "BSCS 1" become THREE separate classes and nothing
+   * downstream can tell they were meant to be one. In a hand-maintained workbook this
+   * drifts quietly over an academic year.
+   *
+   * Warn rather than merge: folding them automatically would silently rewrite naming
+   * an administrator may have chosen deliberately ("Grade 9" vs "Grade 9A").
+   */
+  const STRUCTURE: { key: keyof typeof SYN; field: string; label: string }[] = [
+    { key: 'klass', field: 'class', label: 'class' },
+    { key: 'section', field: 'section', label: 'section' },
+    { key: 'department', field: 'department', label: 'department' },
+    { key: 'program', field: 'program', label: 'program' },
+    { key: 'campus', field: 'campus', label: 'campus' },
+    { key: 'session', field: 'session', label: 'session' },
+    { key: 'semester', field: 'semester', label: 'semester' },
+    { key: 'faculty', field: 'faculty', label: 'faculty' },
+  ];
+  const fold = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  for (const { key, field, label } of STRUCTURE) {
+    const variants = new Map<string, Set<string>>();
+    for (const r of rows.students) {
+      const raw = g(r, key);
+      if (!raw) continue;
+      const folded = fold(raw);
+      if (!folded) continue;
+      let set = variants.get(folded);
+      if (!set) { set = new Set<string>(); variants.set(folded, set); }
+      set.add(raw);
+    }
+    for (const set of variants.values()) {
+      if (set.size < 2) continue;
+      warnings.push({
+        entity: 'students',
+        row: null,
+        field,
+        key: null,
+        message: `${set.size} spellings of what looks like one ${label}: ${[...set].map((v) => `"${v}"`).join(', ')}. Each becomes a SEPARATE ${label}. Make them identical if they are meant to be the same.`,
+      });
+    }
+  }
+
   const teacherIds = new Set<string>();
   rows.teachers.forEach((r, i) => {
     const id = g(r, 'teacherId') || g(r, 'employeeCode');

@@ -342,7 +342,96 @@ re-seed cannot overwrite an installed production licence.
 | *issued for the organisation "x", but this installation is "y"* | The licence `--slug` must equal `ORG_SLUG` in `.env` |
 | *could not be verified* | Truncated paste, or signed with a different key pair |
 
-## 7. Audit
+## 7. Lifecycle, renewal and offline operation
+
+```
+   vendor issues a licence          node tools/license.cjs create ...
+              |
+              v
+   customer receives one text file  abc-license.txt  (email, USB, printed)
+              |
+              v
+   administrator installs it        Licence page -> paste -> Install licence
+              |
+              v
+   application verifies it          Ed25519 against the COMPILED-IN public key
+              |                     slug must match this installation
+              v
+   edition and modules enabled      stored in configurations, survives restarts
+              |
+              v
+   status monitored                 Licence page + banner from 30 days out
+              |
+              v
+   renewal issued before expiry     install over the top; no downtime, no restart
+```
+
+### Renewal and replacement
+
+A renewal is installed exactly like a first licence: paste it, press **Install licence**.
+The new one replaces the old one in place. No restart, no downtime, and nothing is deleted.
+
+| Situation | What to do | Notes |
+|---|---|---|
+| **Approaching expiry** | Install the renewal any time | `--starts` lets a renewal be issued ahead of its start date |
+| **Already expired** | Install the renewal | Reading, reporting and installing all still work while expired; only *new* records are blocked |
+| **Changing edition** | Issue a new licence with the new `--edition` and install it | Modules change on the next status read (30-second cache) |
+| **Changing employee limit** | Issue with a new `--employees` and install it | Takes effect immediately |
+| **Wrong organisation** | Re-issue with the correct `--slug` | A slug mismatch is refused; it must equal `ORG_SLUG` in `.env` |
+
+Verification is checked **before** anything is stored, so a mistyped or wrong licence can
+never displace a working one.
+
+> **WARNING — replacing a licence is recorded but not reversible.** The previous licence
+> string is not retained. Keep the file you were sent.
+
+### Offline and air-gapped deployments
+
+**Licensing needs no network at any point.** There is no licence server, no activation
+call, no heartbeat and no phone-home. Verification is a local Ed25519 signature check
+against a public key compiled into the build.
+
+For a site with no internet, no Wi-Fi and no external access:
+
+1. The vendor mints the licence on their own machine.
+2. It travels as a text file — email to a connected machine, then USB; or printed and
+   retyped, since the payload is plain text.
+3. The administrator pastes it into the Licence page. Done.
+
+> **Set the server clock from an internal NTP source.** Expiry, the grace period and the
+> "expiring soon" banner are all computed against the server clock, and an air-gapped
+> machine has no public NTP to correct drift. A clock that runs fast will report a valid
+> licence as expired.
+
+### Security — what this does and does not do
+
+**What is true:**
+
+- The licence is an **Ed25519-signed claim**. Editing the readable payload invalidates the
+  signature.
+- The **private signing key never leaves the vendor's machine.** It is not in the
+  repository, not in any Docker image, and not in any customer package.
+- A release build carries only the **public** key, compiled into `dist`, so it can verify
+  and never sign.
+- A licence is **bound to the organisation slug**, so it cannot be moved to another
+  customer's installation.
+- Installation and replacement are recorded in the audit trail.
+
+**What is NOT true, and must not be claimed:**
+
+> A licence cannot stop a technically capable administrator with root or Administrator
+> access on the server. They control the operating system, the container runtime and the
+> files on disk, and can modify the application. The design raises the effort from a
+> configuration change to a deliberate modification of a delivered binary artefact — which
+> makes a bypass an evidenced act rather than a plausible accident. It does not make the
+> software uncrackable, and no on-premise licensing scheme can.
+
+The commercial protections carry the rest: support and upgrades conditional on a valid
+licence, the audit trail, and the contract.
+
+---
+
+## 8. Audit
 
 Licence installation and replacement are recorded in the existing audit trail
 (`entity_type = 'license'`) with the licence id, edition, expiry and limit — never the
