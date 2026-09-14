@@ -1,11 +1,14 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { submissionDeadlinePassed } from '../../common/dates/submission-deadline';
 import { AuditService } from '../../common/audit/audit.service';
 import { FeedbackAuditService } from '../../feedback-audit/feedback-audit.service';
 import { WebhookService } from '../../integration/services/webhook.service';
 import { DispatchService } from '../../communication/services/dispatch.service';
 import type { AuthUser, RequestContext } from '../../common/auth/current-user';
-import type { CreateCycleDto } from '../appraisal.dto';
+import type { CreateCycleDto, UpdateCycleDto } from '../appraisal.dto';
+import { EntitlementService } from '../../license/entitlement.service';
 
 @Injectable()
 export class CycleService {
@@ -14,6 +17,7 @@ export class CycleService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementService,
     private readonly feedbackAudit: FeedbackAuditService,
     private readonly webhooks: WebhookService,
     private readonly dispatch: DispatchService,
@@ -31,6 +35,10 @@ export class CycleService {
       status: r.status,
       startDate: r.startDate,
       endDate: r.endDate,
+      // Surfaced in the list, not just the detail, because the deadline is what silently
+      // stops feedback being accepted — an administrator should be able to see it on the
+      // cycle card rather than discover it from a parent who could not submit.
+      submissionDeadline: r.submissionDeadline,
       participants: r._count.participants,
       sources: r._count.sources,
     }));
@@ -54,6 +62,9 @@ export class CycleService {
     if (new Date(dto.endDate) < new Date(dto.startDate)) {
       throw new BadRequestException('End date must be after start date.');
     }
+    // Plan limits are checked before anything is written, so a refusal never leaves a
+    // half-created cycle behind.
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxCyclesPerYear', 1);
     const row = await this.prisma.appraisalCycle.create({
       data: {
         organizationId: user.organizationId,
@@ -85,6 +96,12 @@ export class CycleService {
 
   async setStatus(user: AuthUser, ctx: RequestContext, id: string, status: 'active' | 'closed' | 'archived'): Promise<{ id: string; status: string }> {
     const existing = await this.getOwned(user.organizationId, id);
+    // The active-cycle cap belongs here rather than at creation: a cycle is created as
+    // a draft, and drafts cost nothing. Re-activating counts the same as a first
+    // activation, and a cycle that is already active is not counted twice.
+    if (status === 'active' && existing.status !== 'active') {
+      await this.entitlements.assertWithinLimit(user.organizationId, 'maxActiveCycles', 1);
+    }
     await this.prisma.appraisalCycle.update({ where: { id }, data: { status, updatedBy: user.userId } });
     await this.record(user, ctx, `appraisal.cycle.${status}`, id, null);
     // Semantic feedback-trail action: re-activating a closed/archived cycle is a
@@ -207,9 +224,89 @@ export class CycleService {
           : `This feedback cycle is ${cycle.status} and no longer accepts feedback.`,
       );
     }
-    if (cycle.submissionDeadline && Date.now() > new Date(cycle.submissionDeadline).getTime()) {
+    if (submissionDeadlinePassed(cycle.submissionDeadline)) {
       throw new BadRequestException('The submission deadline for this feedback cycle has passed.');
     }
+  }
+
+  /**
+   * Edit a cycle in place (F-C5 follow-up).
+   *
+   * Until now a cycle could be created, activated, closed and cloned but never
+   * edited, so a submission deadline set wrongly could only be corrected with SQL
+   * against the live database — and `clone()` copies `submissionDeadline` from its
+   * source, so cloning did not help either. Extending a deadline on a running cycle
+   * is an ordinary administrative act and should not require a DBA.
+   *
+   * Only `draft` and `active` cycles are editable. Re-dating a closed or archived
+   * cycle would silently change which feedback its published results were allowed to
+   * contain; re-activating first makes that an explicit, audited decision.
+   */
+  async update(user: AuthUser, ctx: RequestContext, id: string, dto: UpdateCycleDto): Promise<Record<string, unknown>> {
+    const existing = await this.getOwned(user.organizationId, id);
+    if (existing.status !== 'draft' && existing.status !== 'active') {
+      throw new BadRequestException(
+        `This cycle is ${existing.status} and cannot be edited. Re-activate it first if you genuinely intend to change a finished cycle.`,
+      );
+    }
+
+    const startDate = dto.startDate ? new Date(dto.startDate) : existing.startDate;
+    const endDate = dto.endDate ? new Date(dto.endDate) : existing.endDate;
+    if (endDate < startDate) throw new BadRequestException('End date must be after start date.');
+
+    const data: Prisma.AppraisalCycleUpdateInput = { updatedBy: user.userId };
+    if (dto.name !== undefined) data.name = dto.name;
+    if (dto.startDate !== undefined) data.startDate = startDate;
+    if (dto.endDate !== undefined) data.endDate = endDate;
+    // `in` rather than `!== undefined`: an explicit null CLEARS the deadline, which is
+    // the documented way to say "this cycle runs until it is closed by hand". Omitting
+    // the key leaves whatever is stored alone.
+    if ('submissionDeadline' in dto) {
+      data.submissionDeadline = dto.submissionDeadline ? new Date(dto.submissionDeadline) : null;
+    }
+    if (dto.templateId !== undefined) data.templateId = dto.templateId;
+    if (dto.ratingScaleId !== undefined) data.ratingScaleId = dto.ratingScaleId;
+
+    const row = await this.prisma.appraisalCycle.update({ where: { id }, data });
+
+    await this.record(user, ctx, 'appraisal.cycle.update', id, dto);
+    // The feedback trail gets the BEFORE and AFTER of the dates specifically: a moved
+    // deadline changes which responses a cycle was allowed to accept, so anyone reading
+    // an old result later needs to see that it moved, when, and who moved it.
+    await this.feedbackAudit.record({
+      organizationId: user.organizationId,
+      action: 'cycle.updated',
+      actorUserId: user.userId,
+      actorName: user.email,
+      cycleId: id,
+      cycleName: row.name,
+      entityType: 'appraisal_cycle',
+      entityId: id,
+      previousValue: {
+        name: existing.name,
+        startDate: existing.startDate,
+        endDate: existing.endDate,
+        submissionDeadline: existing.submissionDeadline,
+      },
+      newValue: {
+        name: row.name,
+        startDate: row.startDate,
+        endDate: row.endDate,
+        submissionDeadline: row.submissionDeadline,
+      },
+      ctx,
+    });
+
+    return {
+      id: row.id,
+      name: row.name,
+      status: row.status,
+      startDate: row.startDate,
+      endDate: row.endDate,
+      submissionDeadline: row.submissionDeadline,
+      templateId: row.templateId,
+      ratingScaleId: row.ratingScaleId,
+    };
   }
 
   /**

@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { BarChart3, Building2, ClipboardCheck, ClipboardList, Cloud, FileSpreadsheet, GitBranch, GraduationCap, Layers, LayoutDashboard, ListChecks, LogOut, Menu, MessageSquare, KeyRound, Network, Palette, Plug, ScrollText, Settings, ShieldCheck, Sparkles, Target, UserCog, X } from 'lucide-react';
+import { BarChart3, Building2, CreditCard, Lock, ClipboardCheck, ClipboardList, Cloud, FileSpreadsheet, GitBranch, GraduationCap, Layers, LayoutDashboard, ListChecks, LogOut, Menu, MessageSquare, KeyRound, Network, Palette, Plug, ScrollText, Settings, ShieldCheck, Sparkles, Target, UserCog, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth, usePermissions } from '@/features/auth/AuthContext';
 import { NotificationBell } from '@/features/notifications/NotificationBell';
 import { useFeatureFlags } from '@/features/config/useFeatureFlags';
 import { PageHelpButton } from './PageHelpButton';
 import { useBranding } from '@/app/BrandingContext';
-import { ROUTE_MODULE, useLicense } from '@/features/license/useLicense';
+import { ROUTE_MODULE } from '@/features/license/useLicense';
+import { useEntitlements } from '@/features/license/useEntitlements';
+import { LimitBanner } from '@/features/license/LimitBanner';
 import { LicenseBanner } from '@/features/license/LicenseBanner';
 
 interface NavItem {
@@ -15,6 +17,13 @@ interface NavItem {
   label: string;
   icon: JSX.Element;
   perm?: string; // permission required to see this item (omitted = always shown)
+  /**
+   * Set when the organisation's plan does not include this module. The entry is still
+   * rendered, dimmed and locked, and leads to the upgrade page — a customer who cannot
+   * see a feature at all cannot want it, and a menu that silently loses entries reads
+   * as a broken build rather than a plan boundary.
+   */
+  locked?: boolean;
 }
 
 // Flat menu ordered to follow the natural 360 workflow: start at the dashboard;
@@ -55,6 +64,7 @@ const NAV: NavItem[] = [
   // Same permission as the Communication branding form it replaces, so no role
   // gains or loses access as a result of the move.
   { to: '/branding', label: 'Brand Studio', icon: <Palette />, perm: 'communication.manage' },
+  { to: '/subscription', label: 'Subscription', icon: <CreditCard />, perm: 'configuration.read' },
   { to: '/license', label: 'Licence', icon: <KeyRound />, perm: 'configuration.read' },
   { to: '/settings', label: 'Settings', icon: <Settings />, perm: 'configuration.read' },
 ];
@@ -63,21 +73,35 @@ function NavLinks({ items, onNavigate }: { items: NavItem[]; onNavigate?: () => 
   return (
     <nav className="flex-1 space-y-1 px-3 py-2">
       {items.map((item) => (
-        <NavLink
-          key={item.to}
-          to={item.to}
-          end={item.to === '/'}
-          onClick={onNavigate}
-          className={({ isActive }) =>
-            cn(
-              'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors [&_svg]:size-4',
-              isActive ? 'bg-white/15 text-white' : 'text-white/70 hover:bg-white/10 hover:text-white',
-            )
-          }
-        >
-          {item.icon}
-          {item.label}
-        </NavLink>
+        item.locked ? (
+          <NavLink
+            key={item.to}
+            to="/upgrade"
+            onClick={onNavigate}
+            title={`${item.label} is not included in your plan`}
+            className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-white/35 transition-colors hover:bg-white/5 hover:text-white/60 [&_svg]:size-4"
+          >
+            {item.icon}
+            <span className="flex-1">{item.label}</span>
+            <Lock className="size-3" />
+          </NavLink>
+        ) : (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.to === '/'}
+            onClick={onNavigate}
+            className={({ isActive }) =>
+              cn(
+                'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors [&_svg]:size-4',
+                isActive ? 'bg-white/15 text-white' : 'text-white/70 hover:bg-white/10 hover:text-white',
+              )
+            }
+          >
+            {item.icon}
+            {item.label}
+          </NavLink>
+        )
       ))}
     </nav>
   );
@@ -113,16 +137,16 @@ export function AppShell(): JSX.Element {
   // Feature flags now actually gate something (F-H11): an org can hide the
   // early-stage AI Insights module. Unset flags keep the previous behaviour.
   const flags = useFeatureFlags();
-  const { license } = useLicense();
+  const { entitlements } = useEntitlements();
   const nav = NAV.filter((item) => !item.perm || has(item.perm))
     .filter((item) => item.to !== '/ai' || flags.ai_insights !== false)
-    // Licence gating sits ALONGSIDE permissions, never instead of them: a permission
-    // says this user may, a licence says this organisation bought it. Both must hold.
-    // Hiding here is a courtesy — every one of these APIs refuses server-side too.
-    .filter((item) => {
+    // Plan gating sits ALONGSIDE permissions, never instead of them: a permission says
+    // this user may, the plan says this organisation bought it. Both must hold, and
+    // every one of these APIs refuses server-side too — this only decides presentation.
+    .map((item) => {
       const module = ROUTE_MODULE[item.to];
-      if (!module || !license) return true;
-      return license.modules.some((m) => m.key === module);
+      if (!module || !entitlements) return item;
+      return entitlements.modules.includes(module) ? item : { ...item, locked: true };
     });
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
@@ -195,7 +219,8 @@ export function AppShell(): JSX.Element {
           </div>
         </header>
 
-        <LicenseBanner license={license} />
+        <LicenseBanner license={entitlements} />
+        <LimitBanner />
         <main className="flex-1 p-4 sm:p-6">
           <Outlet />
         </main>

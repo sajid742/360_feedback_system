@@ -5,7 +5,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { nkey, ResolverService } from './resolver.service';
 import { DEFAULT_EMPLOYEE_ROLE } from '../../rbac/system-roles';
 import type { EntitySummary, ImportDataset, ImportEntity, ImportMode, ImportSummary, ValidationIssue } from '../org-import.types';
-import { LicenseService } from '../../license/license.service';
+import { EntitlementService } from '../../license/entitlement.service';
 
 export interface ImportOptions {
   mode: ImportMode;
@@ -31,7 +31,7 @@ export class ImportService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly resolver: ResolverService,
-    private readonly license: LicenseService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async run(orgId: string, actorUserId: string | null, dataset: ImportDataset, opts: ImportOptions): Promise<ImportSummary> {
@@ -50,7 +50,7 @@ export class ImportService {
      * A destructive import replaces the existing people, so what it adds is the file's
      * own size; an additive one adds to what is already there.
      */
-    await this.license.assertCanAddEmployees(orgId, destructive ? dataset.employees.length : dataset.employees.length);
+    await this.entitlements.assertWithinLimit(orgId, 'maxEmployees', dataset.employees.length);
 
     const root = await this.prisma.organization.findUnique({ where: { id: orgId }, select: { slug: true } });
     const tenantSlug = root?.slug ?? 'org';
@@ -180,7 +180,32 @@ export class ImportService {
         try {
           if (exists) {
             const cur = await tx.employee.findUnique({ where: { id: empId.get(code)! }, select: { userId: true } });
-            await tx.employee.update({ where: { id: empId.get(code)! }, data: { departmentId: dept, designationId: desig, campusId: camp, status, updatedBy: actorUserId } });
+            /*
+             * A BLANK CELL LEAVES THE STORED VALUE ALONE.
+             *
+             * This used to write `departmentId: dept` unconditionally, where `dept` is
+             * null whenever the column was empty — so re-importing a file that omitted
+             * the Department column silently cleared the department, designation and
+             * campus of every employee in it. `status` was worse: blank meant "active",
+             * so a re-import quietly reinstated people who had been marked inactive.
+             *
+             * An import updates the fields it was given. Clearing one is a deliberate
+             * act and belongs in the employee screen, not in an omitted column. The
+             * employee row itself — its id, its userId, and therefore every reviewer
+             * assignment, response and score hanging off it — is updated in place and
+             * never recreated.
+             */
+            await tx.employee.update({
+              where: { id: empId.get(code)! },
+              data: {
+                ...(e.department ? { departmentId: dept } : {}),
+                ...(e.designation ? { designationId: desig } : {}),
+                ...(e.campus ? { campusId: camp } : {}),
+                ...(e.status ? { status } : {}),
+                ...(this.date(e.joinDate) ? { joinDate: this.date(e.joinDate) } : {}),
+                updatedBy: actorUserId,
+              },
+            });
             if (cur && (e.fullName || e.email)) await tx.user.update({ where: { id: cur.userId }, data: { fullName: e.fullName ?? undefined, email: e.email ? e.email.toLowerCase() : undefined } });
             summary.employees.updated++;
           } else {
@@ -193,7 +218,9 @@ export class ImportService {
           }
         } catch (e2) { summary.employees.failed++; failures.push({ entity: 'employees', row: e._row, field: null, key: code, severity: 'error', message: (e2 as Error).message }); }
       }
-      // 6b) Resolve Reporting To (second pass) once all employees exist.
+      // 6b) Resolve Reporting To (second pass) once all employees exist. A blank
+      // manager column leaves the existing line manager alone, for the same reason a
+      // blank department does: an omitted column is not an instruction to unlink.
       for (const e of dataset.employees) {
         if (!e.managerCode) continue;
         const id = empId.get(e.employeeCode.trim()); const mgr = empId.get(e.managerCode.trim());

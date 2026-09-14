@@ -31,7 +31,14 @@ export function useLicense(): { license: LicenseView | null; loading: boolean } 
   return { license, loading };
 }
 
-/** Nav keys that a licence module switches off, mapped to the module that pays for them. */
+/**
+ * Nav routes that a plan module switches off, mapped to the module that pays for them.
+ *
+ * Every entry here has a matching server-side `@RequiresLicensedModule`, which is the
+ * actual control — this map only decides what the menu shows. Adding a route here
+ * without adding the guard would produce exactly the failure this system is meant to
+ * avoid: hidden in the interface, wide open to a direct call.
+ */
 export const ROUTE_MODULE: Record<string, string> = {
   '/sis-evaluations': 'parent_feedback',
   '/student-integration': 'sis_integration',
@@ -40,4 +47,7 @@ export const ROUTE_MODULE: Record<string, string> = {
   '/ai': 'ai_insights',
   '/integration': 'api_access',
   '/reports': 'reports',
+  '/bulk-generation': 'bulk_generation',
+  '/workflow': 'workflows',
+  '/audit-trail': 'audit_trail',
 };

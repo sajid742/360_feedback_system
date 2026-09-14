@@ -3,7 +3,8 @@ import { PrismaService } from '../prisma/prisma.service';
 
 export interface AuditRecordInput {
   organizationId: string;
-  userId: string;
+  /** null when a scheduled job acted and there is no person to name. */
+  userId: string | null;
   action: string;
   entityType: string;
   entityId: string;

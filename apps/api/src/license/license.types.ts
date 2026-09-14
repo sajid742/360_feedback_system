@@ -19,15 +19,20 @@ export type LicenseEdition = 'trial' | 'demo' | 'standard' | 'professional' | 'e
  * keep in step.
  */
 export const LICENSED_MODULES = [
-  'feedback',        // 360 cycles, questionnaires, competencies — the core, always on
-  'organization',    // employees, departments, org chart
-  'reports',         // reporting and dashboards
-  'communication',   // email / SMS / WhatsApp delivery
-  'parent_feedback', // external parent evaluation
-  'sis_integration', // student information system
-  'hr_integration',  // HR master-data sync
-  'ai_insights',     // AI narrative insights
-  'api_access',      // outbound integration API and webhooks
+  'feedback',         // 360 cycles, questionnaires, competencies — the core, always on
+  'organization',     // employees, departments, org chart — always on
+  'reports',          // individual, departmental and participation reporting
+  'reports_advanced', // executive dashboard, 9-box, heatmap, trend, layout, digests
+  'exports',          // CSV / XLSX / PDF export of reports
+  'communication',    // email / SMS / WhatsApp delivery
+  'parent_feedback',  // external parent evaluation
+  'sis_integration',  // student information system
+  'hr_integration',   // HR master-data sync
+  'bulk_generation',  // bulk cycle generation from a roster
+  'workflows',        // approval definitions, instances, task inbox
+  'audit_trail',      // the 360 feedback audit trail and its export
+  'ai_insights',      // AI narrative insights
+  'api_access',       // outbound integration API and webhooks
 ] as const;
 export type LicensedModule = (typeof LICENSED_MODULES)[number];
 
@@ -35,11 +40,16 @@ export type LicensedModule = (typeof LICENSED_MODULES)[number];
 export const MODULE_LABELS: Record<LicensedModule, string> = {
   feedback: '360 Feedback',
   organization: 'Organization Management',
-  reports: 'Reports & Dashboards',
+  reports: 'Reports',
+  reports_advanced: 'Advanced Reporting & Dashboards',
+  exports: 'Report Exports',
   communication: 'Communication',
   parent_feedback: 'Parent Feedback',
-  sis_integration: 'SIS Integration',
+  sis_integration: 'Student Integration',
   hr_integration: 'HR Integration',
+  bulk_generation: 'Bulk Cycle Generation',
+  workflows: 'Approval Workflows',
+  audit_trail: 'Feedback Audit Trail',
   ai_insights: 'AI Insights',
   api_access: 'API Integration',
 };
@@ -49,7 +59,7 @@ export const MODULE_LABELS: Record<LicensedModule, string> = {
  * can be switched off would only produce support calls, and an expired licence must
  * still let an administrator in to renew it.
  */
-export const ALWAYS_ON_MODULES: LicensedModule[] = ['feedback'];
+export const ALWAYS_ON_MODULES: LicensedModule[] = ['feedback', 'organization'];
 
 /** What the vendor signs. Every field is data — no behaviour is encoded here. */
 export interface LicensePayload {

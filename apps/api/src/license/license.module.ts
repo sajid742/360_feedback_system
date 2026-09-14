@@ -3,6 +3,8 @@ import { PrismaModule } from '../common/prisma/prisma.module';
 import { AuditModule } from '../common/audit/audit.module';
 import { LicenseController } from './license.controller';
 import { LicenseService } from './license.service';
+import { EntitlementService } from './entitlement.service';
+import { EntitlementsController } from './entitlements.controller';
 import { LicensedFeatureGuard } from './licensed-feature.guard';
 
 /**
@@ -13,8 +15,8 @@ import { LicensedFeatureGuard } from './licensed-feature.guard';
 @Global()
 @Module({
   imports: [PrismaModule, AuditModule],
-  controllers: [LicenseController],
-  providers: [LicenseService, LicensedFeatureGuard],
-  exports: [LicenseService, LicensedFeatureGuard],
+  controllers: [LicenseController, EntitlementsController],
+  providers: [LicenseService, EntitlementService, LicensedFeatureGuard],
+  exports: [LicenseService, EntitlementService, LicensedFeatureGuard],
 })
 export class LicenseModule {}

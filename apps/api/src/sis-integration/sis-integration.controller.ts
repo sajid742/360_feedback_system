@@ -86,12 +86,21 @@ export class SisIntegrationController {
     return this.sync.sync(user.organizationId, actor, !dto.live, 'manual', dto.confirm === true);
   }
 
-  /** Download the multi-sheet .xlsx import template. */
+  /**
+   * Download an .xlsx import template.
+   *
+   * `?variant=simple` returns the ONE-SHEET flat roster written for an HR user — one
+   * row per student x subject, repeating the student and parent columns. Anything else
+   * returns the five-sheet template. Both are read by the same importer and both can
+   * express the complete student -> subject -> teacher chain.
+   */
   @Get('template')
-  async template(@Res() res: Response): Promise<void> {
-    const buf = await this.parser.template();
+  async template(@Res() res: Response, @Query('variant') variant?: string): Promise<void> {
+    const simple = variant === 'simple';
+    const buf = simple ? await this.parser.templateSimple() : await this.parser.template();
+    const filename = simple ? 'student-roster-flat.xlsx' : 'sis-import-template.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="sis-import-template.xlsx"');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(buf);
   }
 

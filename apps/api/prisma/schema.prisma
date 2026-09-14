@@ -63,6 +63,12 @@ model Organization {
   workflowInstances             WorkflowInstance[]
   appraisalCycles               AppraisalCycle[]
 
+  /// One LIVE row, enforced by a partial unique index (WHERE deleted_at IS NULL).
+  /// Modelled as a list because Prisma cannot express a partial unique constraint.
+  subscriptions Subscription[]
+  invoices      Invoice[]
+  payments      Payment[]
+
   @@index([parentOrgId])
   @@map("organizations")
 }
@@ -89,6 +95,8 @@ model User {
   passwordHistory PasswordHistory[]
   passwordResetTokens PasswordResetToken[]
   employee        Employee?
+
+  platformAdmin PlatformAdmin[]
 
   @@unique([organizationId, email], name: "user_org_email", map: "uq_users_org_email")
   @@index([organizationId])
@@ -173,7 +181,8 @@ model UserRole {
 model AuditLog {
   id             String   @id @default(uuid()) @db.Uuid
   organizationId String   @map("organization_id") @db.Uuid
-  userId         String   @map("user_id") @db.Uuid
+  /// NULL = a scheduled job did this, not a person (billing lifecycle transitions).
+  userId         String?  @map("user_id") @db.Uuid
   action         String   @db.VarChar(120)
   entityType     String   @map("entity_type") @db.VarChar(80)
   entityId       String   @map("entity_id") @db.Uuid
@@ -1485,4 +1494,175 @@ model SisSyncRun {
 
   @@index([organizationId, startedAt])
   @@map("sis_sync_runs")
+}
+
+/// The tenant's commercial plan. One live row per ROOT organization.
+///
+/// Deliberately its own table rather than a `configurations` row: that table is
+/// writable by any user holding `configuration.manage`, so billing state stored there
+/// could be edited by the tenant it bills. See database/001_reconcile.sql for the
+/// full reasoning.
+model Subscription {
+  id                     String    @id @default(uuid()) @db.Uuid
+  organizationId         String    @map("organization_id") @db.Uuid
+  /// starter | professional | enterprise
+  planCode               String    @default("starter") @map("plan_code") @db.VarChar(32)
+  /// trialing | active | past_due | grace | expired | suspended | cancelled
+  status                 String    @default("active") @db.VarChar(20)
+  trialEndsAt            DateTime? @map("trial_ends_at") @db.Timestamptz(6)
+  currentPeriodStart     DateTime? @map("current_period_start") @db.Timestamptz(6)
+  currentPeriodEnd       DateTime? @map("current_period_end") @db.Timestamptz(6)
+  graceDays              Int       @default(7) @map("grace_days")
+  /// month | year — what the customer is billed on.
+  billingInterval        String    @default("month") @map("billing_interval") @db.VarChar(10)
+  /// Set by a cancellation: access continues to the period end, then lapses.
+  cancelAtPeriodEnd      Boolean   @default(false) @map("cancel_at_period_end")
+  /// Per-tenant deviations from the plan defaults.
+  limitOverrides         Json      @default("{}") @map("limit_overrides")
+  /// { "add": [...], "remove": [...] }
+  moduleOverrides        Json      @default("{}") @map("module_overrides")
+  externalCustomerId     String?   @map("external_customer_id") @db.VarChar(120)
+  externalSubscriptionId String?   @map("external_subscription_id") @db.VarChar(120)
+  notes                  String?
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdBy              String?   @map("created_by") @db.Uuid
+  updatedBy              String?   @map("updated_by") @db.Uuid
+  deletedAt              DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+/// The vendor's own operators. NOT a tenant role — see database/001_reconcile.sql.
+model PlatformAdmin {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  label     String?   @db.VarChar(120)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdBy String?   @map("created_by") @db.Uuid
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("platform_admins")
+}
+
+/// What a plan costs. Money lives here rather than in the code catalogue so a price
+/// can change without a release; `plans.ts` keeps features and limits.
+model PlanPrice {
+  id              String    @id @default(uuid()) @db.Uuid
+  planCode        String    @map("plan_code") @db.VarChar(32)
+  currency        String    @default("PKR") @db.VarChar(3)
+  /// month | year
+  interval        String    @default("month") @db.VarChar(10)
+  /// Minor units — paisa. Never a float.
+  amountMinor     BigInt    @default(0) @map("amount_minor")
+  provider        String    @default("invoice") @db.VarChar(24)
+  /// The provider's own price id, when one exists. This is the mapping between our
+  /// plan codes and a gateway's catalogue.
+  providerPriceId String?   @map("provider_price_id") @db.VarChar(120)
+  isActive        Boolean   @default(true) @map("is_active")
+  effectiveFrom   DateTime  @default(now()) @map("effective_from") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedBy       String?   @map("updated_by") @db.Uuid
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  @@index([planCode])
+  @@map("plan_prices")
+}
+
+/// What a customer owes.
+model Invoice {
+  id                String    @id @default(uuid()) @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  subscriptionId    String?   @map("subscription_id") @db.Uuid
+  /// Human-facing and quoted on the bank transfer: INV-2026-0001.
+  number            String    @db.VarChar(32)
+  planCode          String    @map("plan_code") @db.VarChar(32)
+  interval          String    @default("month") @db.VarChar(10)
+  currency          String    @default("PKR") @db.VarChar(3)
+  subtotalMinor     BigInt    @default(0) @map("subtotal_minor")
+  taxMinor          BigInt    @default(0) @map("tax_minor")
+  totalMinor        BigInt    @default(0) @map("total_minor")
+  /// draft | open | paid | void | uncollectible
+  status            String    @default("open") @db.VarChar(20)
+  periodStart       DateTime? @map("period_start") @db.Timestamptz(6)
+  periodEnd         DateTime? @map("period_end") @db.Timestamptz(6)
+  issuedAt          DateTime  @default(now()) @map("issued_at") @db.Timestamptz(6)
+  dueAt             DateTime? @map("due_at") @db.Timestamptz(6)
+  paidAt            DateTime? @map("paid_at") @db.Timestamptz(6)
+  provider          String    @default("invoice") @db.VarChar(24)
+  providerInvoiceId String?   @map("provider_invoice_id") @db.VarChar(120)
+  notes             String?
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  createdBy         String?   @map("created_by") @db.Uuid
+  updatedBy         String?   @map("updated_by") @db.Uuid
+  deletedAt         DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  payments     Payment[]
+
+  @@index([organizationId, issuedAt])
+  @@index([status])
+  @@map("invoices")
+}
+
+/// What they actually paid. Several rows per invoice are legitimate — a part payment,
+/// then a refund.
+model Payment {
+  id                String    @id @default(uuid()) @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  invoiceId         String?   @map("invoice_id") @db.Uuid
+  provider          String    @default("invoice") @db.VarChar(24)
+  providerPaymentId String?   @map("provider_payment_id") @db.VarChar(120)
+  /// bank_transfer | cheque | cash | card | complimentary
+  method            String    @default("bank_transfer") @db.VarChar(24)
+  currency          String    @default("PKR") @db.VarChar(3)
+  amountMinor       BigInt    @default(0) @map("amount_minor")
+  /// succeeded | failed | refunded
+  status            String    @default("succeeded") @db.VarChar(20)
+  /// The payer's own reference — bank transaction id or cheque number, so a recorded
+  /// payment can be checked against a statement later.
+  reference         String?   @db.VarChar(200)
+  failureReason     String?   @map("failure_reason")
+  paidAt            DateTime  @default(now()) @map("paid_at") @db.Timestamptz(6)
+  recordedBy        String?   @map("recorded_by") @db.Uuid
+  notes             String?
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt         DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  invoice      Invoice?     @relation(fields: [invoiceId], references: [id])
+
+  @@index([organizationId, paidAt])
+  @@index([invoiceId])
+  @@map("payments")
+}
+
+/// Every webhook received, ever. `providerEventId` carries the unique index, and that
+/// index — not application logic — is what makes processing idempotent.
+model BillingEvent {
+  id              String    @id @default(uuid()) @db.Uuid
+  provider        String    @db.VarChar(24)
+  providerEventId String    @map("provider_event_id") @db.VarChar(160)
+  type            String    @db.VarChar(120)
+  signatureValid  Boolean   @default(false) @map("signature_valid")
+  /// received | processed | ignored | failed
+  status          String    @default("received") @db.VarChar(20)
+  organizationId  String?   @map("organization_id") @db.Uuid
+  payload         Json      @default("{}")
+  error           String?
+  receivedAt      DateTime  @default(now()) @map("received_at") @db.Timestamptz(6)
+  processedAt     DateTime? @map("processed_at") @db.Timestamptz(6)
+
+  @@unique([provider, providerEventId])
+  @@index([receivedAt])
+  @@map("billing_events")
 }

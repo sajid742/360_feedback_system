@@ -9,7 +9,9 @@ import { CommunicationSettingsService } from '../../communication/communication.
 import { IdentityMapService } from '../../identity/identity-map.service';
 import { ScoringService } from '../../appraisal/services/scoring.service';
 import { FeedbackAuditService } from '../../feedback-audit/feedback-audit.service';
+import { submissionDeadlinePassed } from '../../common/dates/submission-deadline';
 import { DEFAULT_RATING_SCALE, DEFAULT_TEACHER_QUESTIONS, type EvalQuestion } from '../default-questionnaire';
+import { EntitlementService } from '../../license/entitlement.service';
 import type {
   CreateConsolidatedLinkDto,
   CreateEvaluationLinkDto,
@@ -28,6 +30,64 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** `evaluation_links.mode` / `feedback_sources.parent_mode` value for the consolidated form. */
 const CONSOLIDATED = 'consolidated';
 
+/** A guardian's contact details, as far as any of these paths care. */
+interface ParentContact {
+  mobile?: string | null;
+  whatsapp?: string | null;
+  email?: string | null;
+}
+
+/**
+ * The address to use FOR THE CHANNEL BEING SENT ON.
+ *
+ * The bug this replaces: the recipient was resolved once, at link creation, as
+ * `whatsapp ?? mobile ?? email` — a phone number for almost every guardian — and then
+ * reused whatever channel was chosen later. Sending by e-mail therefore put a phone
+ * number in the `To:` header, and nodemailer rejected the message with
+ * "No recipients defined", which names neither the address nor the cause.
+ *
+ * The admin screen has always shown the right thing ("Sends to: …" switches with the
+ * channel picker); only the server disagreed. This makes the server agree.
+ */
+export function contactForChannel(channel: Channel, parent: ParentContact): string | null {
+  const clean = (v: string | null | undefined): string | null => {
+    const t = (v ?? '').trim();
+    return t.length > 0 ? t : null;
+  };
+  if (channel === 'email') return clean(parent.email);
+  // SMS needs a real mobile; a WhatsApp-only number is usually the same handset, so it
+  // is a reasonable fallback. WhatsApp prefers its own number and falls back to mobile.
+  if (channel === 'sms') return clean(parent.mobile) ?? clean(parent.whatsapp);
+  return clean(parent.whatsapp) ?? clean(parent.mobile);
+}
+
+/**
+ * Refuse an address that cannot work on the chosen channel, before handing it to a
+ * provider. Catching it here turns an opaque SMTP failure recorded against the parent
+ * into an actionable message for the administrator who pressed Send.
+ */
+export function assertRecipientShape(channel: Channel, recipient: string): void {
+  const value = recipient.trim();
+  if (channel === 'email') {
+    // Deliberately permissive — one @, something either side, no spaces. The point is
+    // to catch a phone number, not to re-litigate RFC 5322.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+      throw new BadRequestException(
+        `"${value}" is not an e-mail address, so this invitation cannot be sent by e-mail. ` +
+          `Add the guardian's e-mail under Student Integration → Students & Parents, or send by WhatsApp or SMS instead.`,
+      );
+    }
+    return;
+  }
+  // WhatsApp and SMS: a phone number. An e-mail address here fails just as silently.
+  if (value.includes('@') || !/[0-9]/.test(value)) {
+    throw new BadRequestException(
+      `"${value}" is not a phone number, so this invitation cannot be sent by ${channel === 'sms' ? 'SMS' : 'WhatsApp'}. ` +
+        `Add the guardian's mobile number under Student Integration → Students & Parents, or send by e-mail instead.`,
+    );
+  }
+}
+
 @Injectable()
 export class EvaluationLinkService {
   constructor(
@@ -39,6 +99,7 @@ export class EvaluationLinkService {
     private readonly identity: IdentityMapService,
     private readonly scoring: ScoringService,
     private readonly feedbackAudit: FeedbackAuditService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   /* ------------------------------- Admin --------------------------------- */
@@ -48,6 +109,14 @@ export class EvaluationLinkService {
     // the end means an unusable configuration cannot leave a half-built link row
     // behind for an administrator to clean up.
     await this.baseUrl(user.organizationId);
+    /*
+     * The monthly parent-link cap, checked alongside the public-URL check so both
+     * failures happen BEFORE anything is written. Regeneration (line ~257) is
+     * deliberately NOT capped: re-issuing a link the tenant already paid for is a
+     * correction, not new consumption, and refusing it would strand a parent whose
+     * first invitation went to a mistyped address.
+     */
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxParentLinksPerMonth', 1);
     const [student, assignment] = await Promise.all([
       this.sis.getStudent(dto.studentId).catch(() => null),
       this.sis.getTeachingAssignment(dto.teachingAssignmentId).catch(() => null),
@@ -62,7 +131,9 @@ export class EvaluationLinkService {
       const parent = parents.find((p) => p.id === dto.parentId);
       if (parent) {
         parentName = parent.name;
-        if (!recipient) recipient = parent.whatsapp ?? parent.mobile ?? parent.email ?? null;
+        // Resolved for the channel this link will actually be sent on, not for a fixed
+        // order of preference. An explicit dto.recipient still wins.
+        if (!recipient) recipient = contactForChannel(dto.channel ?? 'whatsapp', parent);
       }
     }
 
@@ -128,7 +199,14 @@ export class EvaluationLinkService {
     let sent: { channel: Channel; recipient: string } | null = null;
     if (dto.send) {
       const channel = dto.channel ?? 'whatsapp';
-      if (!recipient) throw new BadRequestException('No recipient available — choose a parent or provide a recipient.');
+      if (!recipient) {
+        throw new BadRequestException(
+          channel === 'email'
+            ? 'This guardian has no e-mail address on record, so there is nothing to send to. Add one under Student Integration → Students & Parents, or send by WhatsApp or SMS.'
+            : 'This guardian has no phone number on record, so there is nothing to send to. Add one under Student Integration → Students & Parents, or send by e-mail.',
+        );
+      }
+      assertRecipientShape(channel, recipient);
       await this.deliverWithToken(user.organizationId, user.userId, row, token, channel, recipient);
       sent = { channel, recipient };
     }
@@ -212,11 +290,24 @@ export class EvaluationLinkService {
     // (and recompute each employee's score without the stale parent responses).
     await this.resetAssignments(row.id, row.reviewerAssignmentId);
     let sent: { channel: Channel; recipient: string } | null = null;
-    const recipient = dto.recipient ?? updated.recipient ?? undefined;
     if (dto.channel || dto.recipient) {
-      if (!recipient) throw new BadRequestException('No recipient available to send to.');
-      await this.deliverWithToken(user.organizationId, user.userId, updated, token, dto.channel ?? 'whatsapp', recipient);
-      sent = { channel: dto.channel ?? 'whatsapp', recipient };
+      const channel = dto.channel ?? 'whatsapp';
+      // Re-resolve from the roster for THIS channel. `updated.recipient` holds whatever
+      // the link was last sent to — normally a phone number — so reusing it here is what
+      // put a phone number in the To: header of an e-mail resend. An explicit
+      // dto.recipient still wins, and a link with no parentId keeps its stored value.
+      const resolved = await this.recipientForChannel(updated, channel);
+      const recipient = dto.recipient ?? resolved ?? undefined;
+      if (!recipient) {
+        throw new BadRequestException(
+          channel === 'email'
+            ? 'This guardian has no e-mail address on record, so there is nothing to send to. Add one under Student Integration → Students & Parents, or send by WhatsApp or SMS.'
+            : 'This guardian has no phone number on record, so there is nothing to send to. Add one under Student Integration → Students & Parents, or send by e-mail.',
+        );
+      }
+      assertRecipientShape(channel, recipient);
+      await this.deliverWithToken(user.organizationId, user.userId, updated, token, channel, recipient);
+      sent = { channel, recipient };
     }
     await this.feedbackAudit.recordForLink('link.regenerated', row.id, {
       organizationId: user.organizationId,
@@ -244,6 +335,14 @@ export class EvaluationLinkService {
       }
       throw new GoneException('This evaluation link has expired.');
     }
+    // Check the CYCLE before rendering the form, not only at submit.
+    //
+    // This guard used to run on submit alone, so a parent opened a perfectly valid
+    // link, saw an open form, rated every question, wrote a comment, pressed Submit —
+    // and only then learned the cycle had closed, losing the lot. On a phone, over
+    // mobile data, that is the worst possible place to fail. Failing here costs the
+    // parent one page load instead of ten minutes of work.
+    await this.assertCycleOpen(row.cycleId);
     if (row.status === 'pending' || row.status === 'sent') {
       await this.prisma.evaluationLink.update({ where: { id: row.id }, data: { status: 'opened', openedAt: row.openedAt ?? new Date() } });
       await this.feedbackAudit.recordForLink('link.accessed', row.id, { organizationId: row.organizationId, ...PARENT_ACTOR, ctx: ctx ?? null });
@@ -273,20 +372,9 @@ export class EvaluationLinkService {
     if (row.status === 'expired' || (row.expiresAt && row.expiresAt.getTime() < Date.now())) throw new GoneException('This evaluation link has expired.');
     if (row.status === 'completed' && row.oneTime) throw new GoneException('This evaluation has already been submitted.');
     // Parent/external feedback must not land in a cycle that has already closed or
-    // passed its deadline (F-C5). Queried directly rather than through CycleService
-    // to avoid introducing a module dependency cycle.
-    if (row.cycleId) {
-      const cycle = await this.prisma.appraisalCycle.findFirst({
-        where: { id: row.cycleId, deletedAt: null },
-        select: { status: true, submissionDeadline: true },
-      });
-      if (cycle && cycle.status !== 'active') {
-        throw new GoneException('The feedback cycle for this evaluation is no longer open.');
-      }
-      if (cycle?.submissionDeadline && Date.now() > new Date(cycle.submissionDeadline).getTime()) {
-        throw new GoneException('The submission deadline for this evaluation has passed.');
-      }
-    }
+    // passed its deadline (F-C5). Same guard as the consolidated path and as
+    // `validate()`, so the three can never drift apart.
+    await this.assertCycleOpen(row.cycleId);
 
     const ratings = dto.responses.filter((r) => typeof r.ratingValue === 'number').map((r) => r.ratingValue as number);
     const overall = ratings.length ? Number((ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(2)) : null;
@@ -354,6 +442,14 @@ export class EvaluationLinkService {
     // the end means an unusable configuration cannot leave a half-built link row
     // behind for an administrator to clean up.
     await this.baseUrl(user.organizationId);
+    /*
+     * The monthly parent-link cap, checked alongside the public-URL check so both
+     * failures happen BEFORE anything is written. Regeneration (line ~257) is
+     * deliberately NOT capped: re-issuing a link the tenant already paid for is a
+     * correction, not new consumption, and refusing it would strand a parent whose
+     * first invitation went to a mistyped address.
+     */
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxParentLinksPerMonth', 1);
     const student = await this.sis.getStudent(dto.studentId).catch(() => null);
     if (!student) throw new NotFoundException('Student not found in SIS.');
 
@@ -389,7 +485,8 @@ export class EvaluationLinkService {
       const parent = parents.find((p) => p.id === dto.parentId);
       if (parent) {
         parentName = parent.name;
-        if (!recipient) recipient = parent.whatsapp ?? parent.mobile ?? parent.email ?? null;
+        // Same channel-aware resolution as the per-teacher path above.
+        if (!recipient) recipient = contactForChannel(dto.channel ?? 'whatsapp', parent);
       }
     }
 
@@ -474,7 +571,14 @@ export class EvaluationLinkService {
     let sent: { channel: Channel; recipient: string } | null = null;
     if (dto.send) {
       const channel = dto.channel ?? 'whatsapp';
-      if (!recipient) throw new BadRequestException('No recipient available — choose a parent or provide a recipient.');
+      if (!recipient) {
+        throw new BadRequestException(
+          channel === 'email'
+            ? 'This guardian has no e-mail address on record, so there is nothing to send to. Add one under Student Integration → Students & Parents, or send by WhatsApp or SMS.'
+            : 'This guardian has no phone number on record, so there is nothing to send to. Add one under Student Integration → Students & Parents, or send by e-mail.',
+        );
+      }
+      assertRecipientShape(channel, recipient);
       await this.deliverConsolidated(user.organizationId, user.userId, row, token, channel, recipient, resolved.length);
       sent = { channel, recipient };
     }
@@ -623,6 +727,45 @@ export class EvaluationLinkService {
     return { status: 'completed', rated: rated.length, skipped: targets.length - rated.length };
   }
 
+  /* ------------------------------ cycles -------------------------------- */
+
+  /**
+   * The cycles this page may target, newest first, active ones first.
+   *
+   * Served from here rather than from Appraisals → Cycles so the page needs only
+   * `external.evaluation.manage`: somebody who generates parent links is not
+   * necessarily permitted to read the appraisal module.
+   *
+   * `selectable` marks the cycles a NEW link may be generated into — `active` only,
+   * because an expired or draft cycle refuses feedback the moment the parent opens
+   * the form. The first selectable row is by construction the same cycle
+   * `provisionCycle()` falls back to when no id is sent, so the picker's default and
+   * the server's default cannot drift apart.
+   *
+   * Non-selectable cycles are returned too, so a link generated into a cycle that has
+   * since closed can still be labelled with its name instead of showing a bare id.
+   */
+  async cycles(orgId: string): Promise<
+    {
+      id: string;
+      name: string;
+      status: string;
+      startDate: Date;
+      endDate: Date;
+      submissionDeadline: Date | null;
+      selectable: boolean;
+    }[]
+  > {
+    const rows = await this.prisma.appraisalCycle.findMany({
+      where: { organizationId: orgId, deletedAt: null },
+      orderBy: { startDate: 'desc' },
+      select: { id: true, name: true, status: true, startDate: true, endDate: true, submissionDeadline: true },
+    });
+    const active = rows.filter((r) => r.status === 'active');
+    const rest = rows.filter((r) => r.status !== 'active');
+    return [...active, ...rest].map((r) => ({ ...r, selectable: r.status === 'active' }));
+  }
+
   /* --------------------- consolidated-mode internals --------------------- */
 
   /** Is this cycle's Parents quadrant configured for the consolidated form? */
@@ -672,7 +815,13 @@ export class EvaluationLinkService {
     return { min: Math.min(...values), max: Math.max(...values) };
   }
 
-  /** Shared cycle-open guard: parent feedback must not land in a closed or overdue cycle. */
+  /**
+   * Shared cycle-open guard: parent feedback must not land in a closed or overdue cycle.
+   *
+   * Called from `validate()` as well as the two submit paths, so a parent whose cycle
+   * has closed is told on OPENING the link rather than after filling the whole form in.
+   * Queried directly rather than through CycleService to avoid a module dependency cycle.
+   */
   private async assertCycleOpen(cycleId: string | null): Promise<void> {
     if (!cycleId) return;
     const cycle = await this.prisma.appraisalCycle.findFirst({
@@ -680,8 +829,15 @@ export class EvaluationLinkService {
       select: { status: true, submissionDeadline: true },
     });
     if (cycle && cycle.status !== 'active') throw new GoneException('The feedback cycle for this evaluation is no longer open.');
-    if (cycle?.submissionDeadline && Date.now() > new Date(cycle.submissionDeadline).getTime()) {
-      throw new GoneException('The submission deadline for this evaluation has passed.');
+    if (submissionDeadlinePassed(cycle?.submissionDeadline)) {
+      // Name the date. A parent who is turned away can then say "the deadline was the
+      // 8th" to whoever sent them the link, instead of reporting that "it did not work".
+      const day = cycle?.submissionDeadline?.toISOString().slice(0, 10);
+      throw new GoneException(
+        day
+          ? `The submission deadline for this evaluation has passed. Feedback closed after ${day}. Please contact the school if you still need to respond.`
+          : 'The submission deadline for this evaluation has passed.',
+      );
     }
   }
 
@@ -815,6 +971,32 @@ export class EvaluationLinkService {
 
 
   /** Compose and send the evaluation message for a freshly minted token. */
+  /**
+   * The address to resend an existing link to, for a given channel, read fresh from the
+   * roster. Falls back to the link's stored recipient when the guardian cannot be
+   * resolved (a link created with a hand-typed recipient and no parentId), and returns
+   * that stored value only when it is plausible for the channel — otherwise null, so the
+   * caller raises a message naming the missing contact detail rather than sending a
+   * phone number to an SMTP server.
+   */
+  private async recipientForChannel(
+    row: { studentId: string | null; parentId: string | null; recipient: string | null },
+    channel: Channel,
+  ): Promise<string | null> {
+    if (row.studentId && row.parentId) {
+      const parents = await this.sis.getParentsOfStudent(row.studentId).catch(() => []);
+      const parent = parents.find((p) => p.id === row.parentId);
+      if (parent) {
+        const resolved = contactForChannel(channel, parent);
+        if (resolved) return resolved;
+      }
+    }
+    const stored = (row.recipient ?? '').trim();
+    if (!stored) return null;
+    const looksLikeEmail = stored.includes('@');
+    return (channel === 'email') === looksLikeEmail ? stored : null;
+  }
+
   private async deliverWithToken(
     orgId: string,
     userId: string | null,

@@ -21,6 +21,13 @@ export class CreateEvaluationLinkDto {
   @IsString() @MinLength(1) studentId!: string;
   @IsString() @MinLength(1) teachingAssignmentId!: string;
   @IsOptional() @IsString() parentId?: string;
+  /**
+   * Target a specific cycle instead of the currently active one. Omitted, the service
+   * picks the most recently started active cycle — the behaviour this endpoint always
+   * had. The consolidated endpoint has accepted this since bulk generation was added;
+   * the per-teacher endpoint had no way to say which cycle it meant.
+   */
+  @IsOptional() @IsUUID() cycleId?: string;
   @IsOptional() @IsInt() @Min(1) @Max(365) expiresInDays?: number;
   @IsOptional() @IsBoolean() oneTime?: boolean;
   @IsOptional() @IsUUID() templateId?: string;

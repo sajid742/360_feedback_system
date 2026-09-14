@@ -1,6 +1,7 @@
 import { Controller, Get, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
+import { LicensedFeatureGuard, RequiresLicensedModule } from '../license/licensed-feature.guard';
 import { PermissionsGuard } from '../common/auth/permissions.guard';
 import { RequirePermissions } from '../common/auth/require-permissions.decorator';
 import { CurrentUser, type AuthUser } from '../common/auth/current-user';
@@ -14,8 +15,9 @@ import { FeedbackAuditService, type FeedbackAuditQuery } from './feedback-audit.
  * append-only at the database layer.
  */
 @Controller('feedback-audit')
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, LicensedFeatureGuard)
 @RequirePermissions(FEEDBACK_AUDIT_PERMISSIONS.read)
+@RequiresLicensedModule('audit_trail')
 export class FeedbackAuditController {
   constructor(private readonly audit: FeedbackAuditService) {}
 

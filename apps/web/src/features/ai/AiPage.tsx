@@ -10,6 +10,8 @@ import { StatCard } from '@/components/shared/StatCard';
 import { EChart } from '@/lib/echart';
 import { appraisalApi, type Cycle } from '@/features/appraisal/api';
 import { orgApi, type Employee } from '@/features/organization/api';
+import { usePermissions } from '@/features/auth/AuthContext';
+import { ProviderSettings } from './ProviderSettings';
 import {
   aiApi,
   type AiStatus,
@@ -23,6 +25,10 @@ import {
 const SENTIMENT_COLORS = { positive: '#10b981', neutral: '#f5a524', negative: '#fb7185' };
 
 export function AiPage(): JSX.Element {
+  const { has } = usePermissions();
+  // Anyone who can see configuration can see how the AI is set up; only
+  // `configuration.manage` can change it, which the panel itself enforces.
+  const canSeeSettings = has('configuration.read');
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [cycleId, setCycleId] = useState<string>('');
   const [status, setStatus] = useState<AiStatus | null>(null);
@@ -74,9 +80,13 @@ export function AiPage(): JSX.Element {
           <TabsList>
             <TabsTrigger value="overview">Organisation overview</TabsTrigger>
             <TabsTrigger value="individual">Individual insights</TabsTrigger>
+            {canSeeSettings ? <TabsTrigger value="provider">Language model</TabsTrigger> : null}
           </TabsList>
           <TabsContent value="overview"><OverviewTab cycleId={cycleId || undefined} /></TabsContent>
           <TabsContent value="individual"><IndividualTab cycleId={cycleId || undefined} /></TabsContent>
+          {canSeeSettings ? (
+            <TabsContent value="provider"><ProviderSettings /></TabsContent>
+          ) : null}
         </Tabs>
       </Card>
     </div>

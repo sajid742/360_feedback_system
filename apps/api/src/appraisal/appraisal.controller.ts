@@ -32,6 +32,7 @@ import {
   CalibrateDto,
   CreateAssignmentDto,
   CreateCycleDto,
+  UpdateCycleDto,
   ImportParticipantsDto,
   SaveCycleTemplateDto,
   SetPotentialDto,
@@ -68,6 +69,18 @@ export class AppraisalController {
   @RequirePermissions(P.cycleManage)
   createCycle(@CurrentUser() user: AuthUser, @ReqContext() ctx: RequestContext, @Body() dto: CreateCycleDto) {
     return this.cycles.create(user, ctx, dto);
+  }
+
+  /** Edit a draft or active cycle — notably to correct or extend its submission deadline. */
+  @Put('cycles/:id')
+  @RequirePermissions(P.cycleManage)
+  updateCycle(
+    @CurrentUser() user: AuthUser,
+    @ReqContext() ctx: RequestContext,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateCycleDto,
+  ) {
+    return this.cycles.update(user, ctx, id, dto);
   }
 
   @Post('cycles/:id/activate')

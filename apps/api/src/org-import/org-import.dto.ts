@@ -10,6 +10,13 @@ export class UploadDto {
   @IsString() contentBase64!: string;
   @IsOptional() @IsIn(ENTITIES) entity?: ImportEntity; // required for CSV uploads
   @IsOptional() @IsIn(MODES) mode?: ImportMode;
+  /**
+   * Treat an employees file as the flat Staff sheet: derive the Departments,
+   * Designations and Campuses it references instead of requiring them to exist. An
+   * .xlsx with a sheet named "Staff" sets this on its own; a CSV has no sheet name,
+   * so the caller says so.
+   */
+  @IsOptional() @IsBoolean() flat?: boolean;
 }
 
 export class ConfirmDto {

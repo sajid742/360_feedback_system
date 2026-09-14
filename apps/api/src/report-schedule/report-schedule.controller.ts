@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
+import { LicensedFeatureGuard, RequiresLicensedModule } from '../license/licensed-feature.guard';
 import { PermissionsGuard } from '../common/auth/permissions.guard';
 import { RequirePermissions } from '../common/auth/require-permissions.decorator';
 import { CurrentUser, type AuthUser } from '../common/auth/current-user';
@@ -7,8 +8,11 @@ import { ReportScheduleService } from './report-schedule.service';
 import { CreateScheduleDto } from './report-schedule.dto';
 import { REPORTS_PERMISSIONS as P } from '../reports/reports.permissions';
 
+// Scheduled digests are part of the advanced reporting tier, so the module gate sits
+// alongside the existing permission gate rather than replacing it.
 @Controller('reports/schedules')
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, LicensedFeatureGuard)
+@RequiresLicensedModule('reports_advanced')
 export class ReportScheduleController {
   constructor(private readonly schedules: ReportScheduleService) {}
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ClipboardCheck, Copy, Eye, EyeOff, LayoutTemplate, Plus, Save, Trash2 } from 'lucide-react';
+import { CalendarClock, ClipboardCheck, Copy, Eye, EyeOff, LayoutTemplate, Pencil, Plus, Save, Trash2 } from 'lucide-react';
 import { Badge, type BadgeVariant } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -10,6 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/toast';
+import { ApiError } from '@/lib/api-client';
 import { appraisalApi, type Cycle, type CycleTemplate, type MyReview, type ReviewForm } from './api';
 import { CycleDetail } from './CycleDetail';
 
@@ -54,6 +55,7 @@ function CyclesTab(): JSX.Element {
   const [dates, setDates] = useState({ startDate: '', endDate: '' });
   const [templateId, setTemplateId] = useState('');
   const [saveFor, setSaveFor] = useState<Cycle | null>(null);
+  const [editing, setEditing] = useState<Cycle | null>(null);
 
   const reload = useCallback(() => appraisalApi.listCycles().then(setCycles), []);
   const reloadTemplates = useCallback(() => appraisalApi.listCycleTemplates().then(setTemplates), []);
@@ -141,10 +143,23 @@ function CyclesTab(): JSX.Element {
           <div key={c.id} className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card p-4 shadow-card transition-shadow hover:shadow-card-hover">
             <button onClick={() => setSelected(c.id)} className="flex-1 text-left">
               <p className="font-semibold">{c.name}</p>
-              <p className="text-xs text-muted-foreground">{c.participants} participants · {c.sources} sources</p>
+              <p className="text-xs text-muted-foreground">
+                {c.participants} participants · {c.sources} sources
+                <DeadlineNote cycle={c} />
+              </p>
             </button>
             <div className="flex items-center gap-2">
               <Badge variant={STATUS[c.status] ?? 'neutral'}>{c.status}</Badge>
+              {c.status === 'draft' || c.status === 'active' ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  title="Edit name, dates and submission deadline"
+                  onClick={() => setEditing(c)}
+                >
+                  <Pencil className="size-3.5" />
+                </Button>
+              ) : null}
               <Button
                 size="sm"
                 variant="ghost"
@@ -173,6 +188,15 @@ function CyclesTab(): JSX.Element {
         ) : null}
       </div>
 
+      {editing ? (
+        <EditCycleDialog
+          cycle={editing}
+          onClose={() => setEditing(null)}
+          onSaved={async () => { setEditing(null); await reload(); toast.success('Cycle updated.'); }}
+          onError={(message) => toast.error(message)}
+        />
+      ) : null}
+
       {saveFor ? (
         <SaveTemplateDialog
           cycle={saveFor}
@@ -181,6 +205,132 @@ function CyclesTab(): JSX.Element {
           onError={() => toast.error('Could not save the template.')}
         />
       ) : null}
+    </div>
+  );
+}
+
+/** A `date` from the API arrives as an ISO instant at UTC midnight; take the calendar
+ *  parts back out so an `<input type="date">` and the label agree with what was stored. */
+function toDateInput(value: string | null): string {
+  return value ? value.slice(0, 10) : '';
+}
+
+/**
+ * The deadline, on the cycle card. Worth the space: an expired deadline stops feedback
+ * being accepted without changing the cycle's status, so "active" alone can look fine
+ * while every parent link is being refused.
+ */
+function DeadlineNote({ cycle }: { cycle: Cycle }): JSX.Element | null {
+  if (!cycle.submissionDeadline) return null;
+  const day = toDateInput(cycle.submissionDeadline);
+  // Compare calendar days, not instants — the deadline day itself is still open.
+  const todayLocal = new Date();
+  const today = `${todayLocal.getFullYear()}-${String(todayLocal.getMonth() + 1).padStart(2, '0')}-${String(todayLocal.getDate()).padStart(2, '0')}`;
+  const passed = day < today;
+  return (
+    <>
+      {' · '}
+      <span className={passed ? 'font-medium text-red-600' : undefined}>
+        <CalendarClock className="mr-0.5 inline size-3" />
+        {passed ? `deadline passed ${day}` : `deadline ${day}`}
+      </span>
+    </>
+  );
+}
+
+/**
+ * Edit a cycle in place. This exists because a submission deadline set wrongly used to
+ * be uncorrectable: there was no edit route, and cloning copies the deadline from its
+ * source, so the only fix was SQL against the live database.
+ */
+function EditCycleDialog({
+  cycle,
+  onClose,
+  onSaved,
+  onError,
+}: {
+  cycle: Cycle;
+  onClose: () => void;
+  onSaved: () => void;
+  onError: (message: string) => void;
+}): JSX.Element {
+  const [name, setName] = useState(cycle.name);
+  const [startDate, setStartDate] = useState(toDateInput(cycle.startDate));
+  const [endDate, setEndDate] = useState(toDateInput(cycle.endDate));
+  const [deadline, setDeadline] = useState(toDateInput(cycle.submissionDeadline));
+  const [saving, setSaving] = useState(false);
+
+  async function save(): Promise<void> {
+    if (!name.trim() || !startDate || !endDate) {
+      onError('A cycle needs a name and start/end dates.');
+      return;
+    }
+    if (endDate < startDate) {
+      onError('The end date cannot be before the start date.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await appraisalApi.updateCycle(cycle.id, {
+        name: name.trim(),
+        startDate,
+        endDate,
+        // An empty box means "no deadline", which is a real setting, not an omission —
+        // so send an explicit null rather than dropping the key.
+        submissionDeadline: deadline ? deadline : null,
+      });
+      onSaved();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : 'Could not update the cycle.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-lg" onClick={(e) => e.stopPropagation()}>
+        <p className="mb-1 text-base font-bold">Edit cycle</p>
+        <p className="mb-4 text-xs text-muted-foreground">
+          Changing the dates does not alter any feedback already collected. Only draft and
+          active cycles can be edited.
+        </p>
+        <div className="grid gap-3">
+          <div className="grid gap-1">
+            <label className="text-xs font-medium" htmlFor="edit-cycle-name">Name</label>
+            <Input id="edit-cycle-name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-1">
+              <label className="text-xs font-medium" htmlFor="edit-cycle-start">Start date</label>
+              <Input id="edit-cycle-start" type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+            </div>
+            <div className="grid gap-1">
+              <label className="text-xs font-medium" htmlFor="edit-cycle-end">End date</label>
+              <Input id="edit-cycle-end" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+            </div>
+          </div>
+          <div className="grid gap-1">
+            <label className="text-xs font-medium" htmlFor="edit-cycle-deadline">Submission deadline</label>
+            <div className="flex items-center gap-2">
+              <Input id="edit-cycle-deadline" type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
+              {deadline ? (
+                <Button variant="ghost" size="sm" onClick={() => setDeadline('')} title="Remove the deadline">
+                  Clear
+                </Button>
+              ) : null}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Feedback is accepted up to and including this day. Leave it empty to keep
+              collecting until you close the cycle.
+            </p>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</Button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

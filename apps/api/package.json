@@ -20,7 +20,8 @@
     "db:demo": "node scripts/run-ts.js scripts/demo-data.ts",
     "db:purge-client": "node scripts/run-ts.js scripts/purge-client.ts",
     "db:new-client": "node scripts/run-ts.js scripts/new-client.ts",
-    "build:config": "node scripts/write-build-config.cjs"
+    "build:config": "node scripts/write-build-config.cjs",
+    "db:platform-admin": "node scripts/run-ts.js scripts/platform-admin.ts"
   },
   "prisma": {
     "seed": "ts-node --transpile-only prisma/seed.ts"

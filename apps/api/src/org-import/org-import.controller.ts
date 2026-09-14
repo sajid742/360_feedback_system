@@ -94,9 +94,33 @@ export class OrgImportController {
     res.send(csv);
   }
 
-  /** Downloadable template: full Excel workbook, or a single-entity CSV. */
+  /**
+   * Downloadable template: the flat one-sheet Staff list, the full Excel workbook, or a
+   * single-entity CSV.
+   *
+   * `variant=staff` is the HR twin of the SIS `variant=simple` roster: same columns as
+   * the Employees sheet, but the departments, designations and campuses it names are
+   * created from the list rather than having to exist first.
+   */
   @Get('template/download')
-  async template(@Res() res: Response, @Query('format') format: 'xlsx' | 'csv' = 'xlsx', @Query('entity') entity: ImportEntity = 'employees'): Promise<void> {
+  async template(
+    @Res() res: Response,
+    @Query('format') format: 'xlsx' | 'csv' = 'xlsx',
+    @Query('entity') entity: ImportEntity = 'employees',
+    @Query('variant') variant?: string,
+  ): Promise<void> {
+    if (variant === 'staff') {
+      if (format === 'csv') {
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="staff-list-flat.csv"');
+        res.send(this.templates.staffCsv());
+        return;
+      }
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="staff-list-flat.xlsx"');
+      res.send(await this.templates.staffWorkbook());
+      return;
+    }
     if (format === 'csv') {
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="import-template-${entity}.csv"`);

@@ -9,7 +9,7 @@ export type CheckStatus = 'up' | 'down' | 'skipped';
  * mismatch here is what turns "we ran the upgrade script" into something an
  * operator can actually verify.
  */
-export const EXPECTED_SCHEMA_VERSION = '2026.08.21-01';
+export const EXPECTED_SCHEMA_VERSION = '2026.09.12-01';
 
 export interface ReadinessResult {
   status: 'ok' | 'degraded' | 'error';

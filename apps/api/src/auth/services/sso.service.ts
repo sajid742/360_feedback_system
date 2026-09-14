@@ -26,12 +26,23 @@ export class SsoService {
   ) {}
 
   async start(orgSlug: string, providerId: string): Promise<{ url: string }> {
+    /*
+     * Root organisations only. A campus is an `organizations` row too, and campus slugs
+     * share the global namespace, so without this filter a campus slug was accepted as
+     * a sign-in realm.
+     *
+     * Both failures — unknown organisation and unconfigured provider — return the SAME
+     * message. This endpoint is unauthenticated and unthrottled, so distinguishing them
+     * let anyone enumerate which tenants exist on the platform.
+     */
     const org = await this.prisma.organization.findFirst({
-      where: { slug: orgSlug, deletedAt: null },
+      where: { slug: orgSlug, orgType: 'root', deletedAt: null },
       select: { id: true },
     });
-    if (!org) throw new UnauthorizedException('Unknown organization.');
-    const provider = await this.requireProvider(org.id, providerId);
+    if (!org) throw new UnauthorizedException('Single sign-on is not available for this organization.');
+    const provider = await this.requireProvider(org.id, providerId).catch(() => {
+      throw new UnauthorizedException('Single sign-on is not available for this organization.');
+    });
     const state = await this.jwt.signAsync(
       { organizationId: org.id, providerId, purpose: 'sso' } satisfies SsoState,
       { expiresIn: '10m' },

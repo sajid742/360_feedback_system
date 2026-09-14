@@ -149,6 +149,28 @@ services:
       BRAND_WEBSITE: ${BRAND_WEBSITE:-}
       BRAND_LOGO_URL: ${BRAND_LOGO_URL:-}
       BRAND_FAVICON_URL: ${BRAND_FAVICON_URL:-}
+      # Billing. Only used when you sell subscriptions; an on-premise licensed
+      # installation leaves every one of these unset. BILLING_WEBHOOK_SECRET unset means
+      # every inbound webhook is rejected, which is the correct posture for a deployment
+      # that expects none.
+      BILLING_PROVIDER: ${BILLING_PROVIDER:-}
+      BILLING_CURRENCY: ${BILLING_CURRENCY:-}
+      BILLING_TAX_PERCENT: ${BILLING_TAX_PERCENT:-}
+      BILLING_DUE_DAYS: ${BILLING_DUE_DAYS:-}
+      BILLING_BANK_ACCOUNT_TITLE: ${BILLING_BANK_ACCOUNT_TITLE:-}
+      BILLING_BANK_NAME: ${BILLING_BANK_NAME:-}
+      BILLING_BANK_BRANCH: ${BILLING_BANK_BRANCH:-}
+      BILLING_BANK_ACCOUNT_NUMBER: ${BILLING_BANK_ACCOUNT_NUMBER:-}
+      BILLING_BANK_IBAN: ${BILLING_BANK_IBAN:-}
+      BILLING_WEBHOOK_SECRET: ${BILLING_WEBHOOK_SECRET:-}
+      # 1BILL (1LINK) through a billing partner. Only read when BILLING_PROVIDER=1bill.
+      ONEBILL_BASE_URL: ${ONEBILL_BASE_URL:-}
+      ONEBILL_API_KEY: ${ONEBILL_API_KEY:-}
+      ONEBILL_CLIENT_ID: ${ONEBILL_CLIENT_ID:-}
+      ONEBILL_PREFIX: ${ONEBILL_PREFIX:-}
+      ONEBILL_WEBHOOK_SECRET: ${ONEBILL_WEBHOOK_SECRET:-}
+      ONEBILL_TIMEOUT_MS: ${ONEBILL_TIMEOUT_MS:-}
+      ONEBILL_SIMULATE: ${ONEBILL_SIMULATE:-}
       # Service name, not localhost — the API and Mock SIS are separate containers.
       SIS_BASE_URL: http://mock-sis:3100/api/v1
       SIS_API_KEY: ${SIS_API_KEY:-mock-sis-dev-key-change-me}

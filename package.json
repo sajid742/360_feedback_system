@@ -43,6 +43,7 @@
     "releases": "powershell -NoProfile -ExecutionPolicy Bypass -File ops/rollback.ps1 -List",
     "docker:init": "docker compose run --rm db-init",
     "docker:demo": "docker compose run --rm -e DEMO_RESEED=true db-init",
-    "docker:logs": "docker compose logs db-init"
+    "docker:logs": "docker compose logs db-init",
+    "db:platform-admin": "npm run -w apps/api db:platform-admin --"
   }
 }

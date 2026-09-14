@@ -11,6 +11,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
+import { LicensedFeatureGuard, RequiresLicensedModule } from '../license/licensed-feature.guard';
 import { PermissionsGuard } from '../common/auth/permissions.guard';
 import { RequirePermissions } from '../common/auth/require-permissions.decorator';
 import { CurrentUser, ReqContext, type AuthUser, type RequestContext } from '../common/auth/current-user';
@@ -20,7 +21,8 @@ import { WORKFLOW_PERMISSIONS as P } from './workflow.permissions';
 import { ActDto, CreateDefinitionDto, DelegateDto, StartInstanceDto } from './workflow.dto';
 
 @Controller('workflow')
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, LicensedFeatureGuard)
+@RequiresLicensedModule('workflows')
 export class WorkflowController {
   constructor(
     private readonly definitions: DefinitionService,

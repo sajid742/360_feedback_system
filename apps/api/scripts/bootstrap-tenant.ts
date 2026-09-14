@@ -10,9 +10,9 @@ import { provisionTenant } from '../src/provisioning/tenant-provisioning';
  *
  * Values are resolved from (in order): --flags, environment variables, defaults.
  *   npm run db:bootstrap-tenant
- *   npm run db:bootstrap-tenant -- --slug care --email sajidq@carepvtltd.com --password "Secret1!"
+ *   npm run db:bootstrap-tenant -- --slug care --email admin@example.invalid --password "Secret1!"
  *
- * Defaults: org "CARE Pvt. Ltd.", slug "care", email "sajidq@carepvtltd.com",
+ * Defaults: org "CARE Pvt. Ltd.", slug "care", email "admin@example.invalid",
  *           password "ChangeMe123!". Run `npm run db:seed` first.
  */
 const prisma = new PrismaClient();
@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   const result = await provisionTenant(prisma, {
     orgName: resolve('org', 'BOOTSTRAP_ORG', 'CARE Pvt. Ltd.'),
     slug: resolve('slug', 'BOOTSTRAP_SLUG', 'care'),
-    email: resolve('email', 'BOOTSTRAP_EMAIL', 'sajidq@carepvtltd.com'),
+    email: resolve('email', 'BOOTSTRAP_EMAIL', 'admin@example.invalid'),
     password: resolve('password', 'BOOTSTRAP_PASSWORD', 'ChangeMe123!'),
     // Parity with the production CLI (src/provisioning/bootstrap.cli.ts), which has
     // always supported this. Without it a dev seeding a tenant that will get its own

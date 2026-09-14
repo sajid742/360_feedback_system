@@ -1,0 +1,9 @@
+# Run artefacts and generated credentials — regenerate, never commit.
+results/*.jtl
+results/*.log
+results/*-resources.csv
+data/users_*.csv
+data/parent-tokens.csv
+data/employees.csv
+data/students.csv
+jmeter.log

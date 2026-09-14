@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAuth, usePermissions } from '@/features/auth/AuthContext';
+import { useEntitlements } from '@/features/license/useEntitlements';
 import { ExecutiveDashboard } from '@/features/reports/ExecutiveDashboard';
 import { HrDashboard } from '@/features/reports/HrDashboard';
 
@@ -11,8 +12,21 @@ import { HrDashboard } from '@/features/reports/HrDashboard';
 export function DashboardPage(): JSX.Element {
   const { user } = useAuth();
   const { has } = usePermissions();
+  const { entitlements } = useEntitlements();
 
-  if (has('reports.executive')) {
+  /*
+   * BOTH gates, not just the permission.
+   *
+   * An administrator on a plan without advanced reporting keeps `reports.executive` in
+   * their role — entitlements and permissions are separate by design — so testing the
+   * permission alone lands them on an executive dashboard whose every request answers
+   * 404, which reads as a broken product rather than a plan boundary. The quick-links
+   * page below is the honest landing for them, and the locked Reports entry explains
+   * the rest.
+   */
+  const advanced = !entitlements || entitlements.modules.includes('reports_advanced');
+
+  if (has('reports.executive') && advanced) {
     return (
       <Tabs defaultValue="executive" className="grid gap-4">
         <TabsList>

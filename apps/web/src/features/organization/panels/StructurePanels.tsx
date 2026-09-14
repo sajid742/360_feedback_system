@@ -56,6 +56,19 @@ function DeptRow({ node, depth, onRemove }: { node: DepartmentNode; depth: numbe
           {depth > 0 ? <ChevronRight className="size-3.5 text-muted-foreground" /> : null}
           <span className="text-sm font-medium">{node.name}</span>
           <Badge variant="info">{node.unitType}</Badge>
+          {/*
+            The campus a unit belongs to. `campusName` has always been on every node of
+            /organization/departments/tree and has always arrived in the browser — it was
+            simply never rendered, which is why campuses looked absent from the hierarchy.
+            A campus is an attribute of a unit here, not a level above it: org-wide units
+            legitimately have none, and a unit's campus can differ from its parent's.
+          */}
+          {node.campusName ? (
+            <span className="flex items-center gap-1 text-xs text-muted-foreground" title={`Campus: ${node.campusName}`}>
+              <Building className="size-3" />
+              {node.campusName}
+            </span>
+          ) : null}
         </div>
         <button onClick={() => onRemove(node.id)} aria-label="Delete" className="text-muted-foreground hover:text-red-600">
           <Trash2 className="size-4" />

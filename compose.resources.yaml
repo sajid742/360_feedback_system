@@ -1,0 +1,131 @@
+# Resource limits and API scaling — derived from the 2026-09-05 performance tests.
+#
+# Overlay, not a replacement. `compose.yaml` is under release management
+# (ops/deploy-release.ps1, ops/RELEASES.md); this file adds limits without touching it:
+#
+#     docker compose -f compose.yaml -f compose.resources.yaml up -d
+#
+# To make it permanent, merge these blocks into compose.yaml and update the deploy
+# scripts — but measure first (see "Verify before adopting" at the foot of this file).
+#
+# ---------------------------------------------------------------------------------
+# WHY THESE NUMBERS
+#
+# Measured on a 2 vCPU / 8 GB box running the API, PostgreSQL, Redis AND the load
+# generator together, against production-shaped data (800 employees, 8,120 students,
+# 21,691 reviewer assignments, 25 MB database):
+#
+#   PostgreSQL  never exceeded 1% CPU or 22 of 200 connections in ANY test, including
+#               a 600-user spike. Total query time in a 5-minute 50-user run was under
+#               1 second. The database is nowhere near being the constraint.
+#   API         peaked at 193% CPU — it is the constraint, and it is CPU-bound on
+#               JSON work, not I/O-bound.
+#   Redis       flat at 1.4 MB throughout. It carries the delivery queue, nothing else.
+#   Database    25 MB on disk at full production data volume.
+#
+# So: spend on API cores, keep PostgreSQL modest, cap Redis tightly.
+# ---------------------------------------------------------------------------------
+
+services:
+  postgres:
+    # 2 cores is generous for something that peaked at 1%. shared_buffers=2GB holds the
+    # entire 25 MB database plus indexes in memory many times over; the rest is headroom
+    # for sorts and for growth.
+    #
+    # max_connections=100 replaces the default 100/200: peak observed was 22, and the
+    # API's Prisma pool (connection_limit) bounds it further. Raising it would only
+    # reserve memory that nothing uses.
+    #
+    # pg_stat_statements is enabled permanently: the single largest bottleneck found in
+    # testing (a 460 ms per-request JSON deserialisation) was invisible without it.
+    command: >
+      postgres
+      -c shared_buffers=2GB
+      -c effective_cache_size=6GB
+      -c work_mem=16MB
+      -c maintenance_work_mem=256MB
+      -c max_connections=100
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.max=5000
+      -c pg_stat_statements.track=all
+      -c track_io_timing=on
+      -c log_min_duration_statement=500
+    deploy:
+      resources:
+        limits: { cpus: '2.0', memory: 4G }
+        reservations: { cpus: '0.5', memory: 2G }
+
+  redis:
+    # Peaked at 1.4 MB. 256 MB is ~180x headroom and still costs nothing.
+    # allkeys-lru so a runaway queue evicts rather than OOMs the container.
+    command: redis-server --maxmemory 200mb --maxmemory-policy allkeys-lru --appendonly yes
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 256M }
+
+  api:
+    # The API is the bottleneck and Node handles requests on one thread, so give it the
+    # cores and run more than one process. See "Scaling the API" below.
+    environment:
+      # V8 heap ceiling below the container limit, so the process GCs rather than being
+      # OOM-killed. RSS peaked at 2.0 GB under stress with the old SIS behaviour; after
+      # the snapshot cache it settles around 1 GB.
+      NODE_OPTIONS: --max-old-space-size=3072
+    deploy:
+      resources:
+        limits: { cpus: '4.0', memory: 4G }
+        reservations: { cpus: '1.0', memory: 1G }
+
+  web:
+    # nginx serving static assets and proxying /api/v1. Negligible in every test.
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 256M }
+
+  worker:
+    # Not load-tested separately — these are conservative defaults, not measurements.
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 1G }
+
+# ---------------------------------------------------------------------------------
+# SCALING THE API
+#
+# The API saturated at 193% CPU while PostgreSQL sat at 1%. Node serves requests on a
+# single thread, so on a host with 4+ cores one API process leaves capacity unused.
+#
+# Two options, in order of preference:
+#
+#   1. Multiple containers, DNS round-robin (no image change):
+#          docker compose -f compose.yaml -f compose.resources.yaml up -d --scale api=3
+#      Docker's embedded DNS resolves `api` to all three. Check that
+#      apps/web/nginx.conf proxies to http://api:3000 by NAME (not to a fixed IP or an
+#      `upstream` block with one hardcoded server) — if it uses an upstream block, add
+#      `resolver 127.0.0.11 valid=10s;` so nginx re-resolves.
+#
+#   2. Node cluster inside one container: run the API under PM2 in cluster mode. Fewer
+#      containers, but it changes the image and the health-check semantics.
+#
+# Start with option 1 and 2 replicas. Re-run performance-tests/jmeter/peak.jmx and
+# compare API CPU: if it now exceeds ~300% you are using the extra cores.
+#
+# CAUTION — things that must stay single-instance if you scale the API:
+#   - @nestjs/schedule cron jobs (SIS auto-sync, reminders, report schedules) will fire
+#     in EVERY replica. Either keep exactly one replica, or gate the crons behind an
+#     env flag (e.g. SCHEDULER_ENABLED=true) set on one instance only.
+#   - The SIS snapshot cache in sis-dataset.service.ts is process-local. That is safe:
+#     each process validates against sis_datasets.updated_at on every read, so a write
+#     from any replica is picked up by all of them on the next request.
+#
+# ---------------------------------------------------------------------------------
+# VERIFY BEFORE ADOPTING
+#
+# All numbers above come from running the API from source on a box shared with the load
+# generator. Container CPU limits and the nginx hop are NOT represented. Before
+# committing to these figures:
+#
+#     docker compose -f compose.yaml -f compose.resources.yaml up -d
+#     cd performance-tests && PERF_HOST=<host> scripts/run.sh peak
+#
+# and compare results/peak.jtl against the figures in
+# claude/Performance_Test_Assessment_And_Report_2026-09-05.md.

@@ -41,10 +41,50 @@ export class ValidationService {
     const knownDesig = (n?: string) => !n || desigKeys.has(nkey(n)) || existing.designationsByName.has(nkey(n));
     const knownEmp = (c?: string) => !c || empCodes.has(c.trim()) || existing.employeesByCode.has(c.trim());
 
+    // Master data the flat Staff sheet derived from the employee rows. Say so — an
+    // administrator should never discover after the fact that a typo in a Department
+    // cell quietly created a new department. Warnings, not errors: creating them is the
+    // point of the flat sheet.
+    for (const [entity, rows] of [
+      ['departments', dataset.departments],
+      ['designations', dataset.designations],
+      ['campuses', dataset.campuses],
+    ] as const) {
+      for (const r of rows) {
+        if (!r._derived) continue;
+        const label = entity === 'departments' ? 'Department' : entity === 'designations' ? 'Designation' : 'Campus/Institute';
+        const known =
+          entity === 'departments' ? existing.departmentsByName.has(nkey(r.name))
+            : entity === 'designations' ? existing.designationsByName.has(nkey(r.name))
+              : existing.campusesByName.has(nkey(r.name));
+        if (!known) {
+          push({
+            entity, row: r._row, field: 'name', key: r.name, severity: 'warning',
+            message: `${label} "${r.name}" does not exist yet and will be created from the staff list (first seen at row ${r._row}). Check the spelling if that is not what you meant.`,
+          });
+        }
+        if (r._variants && r._variants.length > 1) {
+          push({
+            entity, row: r._row, field: 'name', key: r.name, severity: 'warning',
+            message: `${label} "${r.name}" was also written as ${r._variants.filter((v) => v !== r.name).map((v) => `"${v}"`).join(', ')}. These differ only in case or spacing, so they are treated as one record named "${r.name}".`,
+          });
+        }
+      }
+    }
+
     this.checkDupes(dataset.campuses, (r) => nkey(r.name), 'campuses', 'name', push);
     this.checkDupes(dataset.departments, (r) => nkey(r.name), 'departments', 'name', push);
     this.checkDupes(dataset.designations, (r) => nkey(r.name), 'designations', 'name', push);
     this.checkDupes(dataset.competencies, (r) => nkey(r.name), 'competencies', 'name', push);
+    /*
+     * Employees were the one entity NOT checked for duplicates, and they are the one
+     * where a duplicate does silent damage. Two rows carrying the same employee code do
+     * not create two people — the second is treated as an update of the first — so the
+     * earlier row's name, department and manager are overwritten by the later row and
+     * nothing anywhere says so. On a hand-built staff list, two rows for one person is
+     * a mistake far more often than it is an intention.
+     */
+    this.checkDupes(dataset.employees, (r) => r.employeeCode.trim(), 'employees', 'employeeCode', push);
 
     // Campuses — name required (guaranteed by parse); nothing else to validate.
 

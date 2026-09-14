@@ -13,6 +13,7 @@ import { TemplateService } from './services/template.service';
 import { CommunicationSettingsService } from './communication.settings';
 import { COMM_EVENT_LIST, COMM_PLACEHOLDERS, ALL_CHANNELS } from './comm.events';
 import { COMM_PERMISSIONS } from './communication.permissions';
+import { EntitlementService } from '../license/entitlement.service';
 import {
   BrandingDto,
   CreateCampaignDto,
@@ -42,6 +43,7 @@ export class CommunicationController {
     private readonly qr: QrService,
     private readonly templates: TemplateService,
     private readonly settings: CommunicationSettingsService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   @Post('send')
@@ -176,7 +178,18 @@ export class CommunicationController {
   @HttpCode(200)
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @RequirePermissions(COMM_PERMISSIONS.manage)
-  saveBranding(@CurrentUser() user: AuthUser, @Body() dto: BrandingDto) {
+  async saveBranding(@CurrentUser() user: AuthUser, @Body() dto: BrandingDto) {
+    /*
+     * White-labelling in three steps, because the middle one is a real commercial
+     * position: `none` is our product unchanged, `logo` is the customer's mark and
+     * colours on our product name, and `full` renames the product itself.
+     *
+     * The product-identity fields are therefore checked separately from the visual
+     * ones — a plan that allows a logo must not quietly allow a rename.
+     */
+    await this.entitlements.assertBrandingLevel(user.organizationId, 'logo');
+    const renames = dto.appName || dto.shortName || dto.legalName || dto.tagline;
+    if (renames) await this.entitlements.assertBrandingLevel(user.organizationId, 'full');
     return this.templates.setBranding(user.organizationId, user.userId, dto);
   }
 

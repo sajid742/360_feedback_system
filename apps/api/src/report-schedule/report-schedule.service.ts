@@ -5,6 +5,7 @@ import type { AuthUser } from '../common/auth/current-user';
 import { ReportsService } from '../reports/services/reports.service';
 import { NotificationService } from '../communication/services/notification.service';
 import type { CreateScheduleDto } from './report-schedule.dto';
+import { EntitlementService } from '../license/entitlement.service';
 
 const INTERVAL_DAYS: Record<string, number> = { daily: 1, weekly: 7, monthly: 30 };
 
@@ -21,6 +22,7 @@ export class ReportScheduleService {
     private readonly prisma: PrismaService,
     private readonly reports: ReportsService,
     private readonly notifications: NotificationService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async list(user: AuthUser): Promise<Record<string, unknown>[]> {
@@ -42,6 +44,7 @@ export class ReportScheduleService {
   }
 
   async create(user: AuthUser, dto: CreateScheduleDto): Promise<{ id: string }> {
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxScheduledReports', 1);
     const row = await this.prisma.reportSchedule.create({
       data: {
         organizationId: user.organizationId,

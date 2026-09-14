@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import 'dotenv/config';
 import { Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { raw } from 'express';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
@@ -16,6 +17,7 @@ import { DEV_FALLBACK_APP_URL, isUnreachablePublicHost } from './communication/c
  * unknown fields are stripped project-wide.
  */
 async function bootstrap(): Promise<void> {
+  assertSigningSecret();
   // Buffer early logs, then route everything (incl. Nest's own) through the
   // structured JSON logger (F19).
   // `rawBody` keeps the exact bytes of each request body on `req.rawBody`.
@@ -61,6 +63,20 @@ async function bootstrap(): Promise<void> {
   // anything larger died as an opaque 500 (F10). The ceiling is now deliberate,
   // env-tunable, and large enough for the documented 5,000-row import cap.
   const bodyLimit = `${maxUploadMb()}mb`;
+  // THE BILLING WEBHOOK TAKES ITS BODY RAW, AND IS MOUNTED BEFORE THE JSON PARSER.
+  //
+  // Two reasons, and both are load-bearing. First, the signature is computed over the
+  // BYTES RECEIVED: parsing and re-serialising JSON changes key order and whitespace, so
+  // no signature would ever match again. Second — and this is why the parser is bypassed
+  // rather than merely observed — `express.json` answers 400 to a body that is not an
+  // object or array (`null`, `"text"`, `42`, or anything unparseable). That 400 happens
+  // before any application code runs, so the delivery is never recorded, and a provider
+  // that retries on a non-2xx would redeliver it for ever. This endpoint must answer 200
+  // to everything and decide for itself what the bytes were; it cannot do that if a
+  // parser has already refused them.
+  //
+  // body-parser marks the request as read, so the json/urlencoded parsers below skip it.
+  app.use('/api/v1/billing/webhook', raw({ type: () => true, limit: '1mb' }));
   app.useBodyParser('json', { limit: bodyLimit });
   app.useBodyParser('urlencoded', { limit: bodyLimit, extended: true });
 
@@ -119,6 +135,36 @@ function warnIfPublicUrlUnusable(): void {
   } else {
     log.warn(`Outbound links will use ${effective} — correct for development, wrong on a server. ${how}`);
   }
+}
+
+/**
+ * Refuse to start without a real JWT signing secret.
+ *
+ * WHY THIS IS FATAL RATHER THAN A WARNING. The access token carries BOTH the tenant
+ * (`organizationId`) and the user's permissions. With a predictable secret anyone can
+ * mint a token for any organisation with any permission set — so on a shared, multi-
+ * tenant deployment a missing environment variable is not a misconfiguration, it is a
+ * total compromise of every customer at once. On-premise the blast radius was one
+ * customer's own server, which is why a default was tolerable before and is not now.
+ *
+ * The compose files already fail on an unset JWT_ACCESS_SECRET (`:?`). This closes the
+ * from-source and hand-rolled-container paths, which had no such guard.
+ */
+function assertSigningSecret(): void {
+  const secret = (process.env.JWT_ACCESS_SECRET ?? '').trim();
+  const weak = ['', 'change-me', 'secret', 'changeme', 'development', 'test'];
+  if (secret.length >= 32 && !weak.includes(secret.toLowerCase())) return;
+  const how =
+    'Generate one with `openssl rand -hex 32` (PowerShell: ' +
+    "-join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })) " +
+    'and set JWT_ACCESS_SECRET in .env next to compose.yaml, or apps/api/.env from source.';
+  // Logger, not console: this is the last thing an operator sees before exit.
+  new Logger('Startup').error(
+    secret.length === 0
+      ? `JWT_ACCESS_SECRET is not set. Refusing to start. ${how}`
+      : `JWT_ACCESS_SECRET is too short or a known placeholder. Refusing to start. ${how}`,
+  );
+  process.exit(1);
 }
 
 void bootstrap();

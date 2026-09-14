@@ -17,7 +17,7 @@ export class ExternalEvaluationController {
 
   @Post()
   create(@CurrentUser() user: AuthUser, @ReqContext() ctx: RequestContext, @Body() dto: CreateEvaluationLinkDto) {
-    return this.links.create(user, dto, undefined, ctx);
+    return this.links.create(user, dto, dto.cycleId, ctx);
   }
 
   /** One consolidated form per student, covering every teacher that student has. */
@@ -30,6 +30,17 @@ export class ExternalEvaluationController {
   @Get('mode')
   mode(@CurrentUser() user: AuthUser, @Query('cycleId') cycleId?: string) {
     return this.links.parentModeOf(user.organizationId, cycleId);
+  }
+
+  /**
+   * The cycles this page can target, and the names of the ones it cannot.
+   *
+   * Declared BEFORE `@Get(':id')`: Nest matches in declaration order, so below it
+   * `cycles` would be swallowed by the id route and rejected by its UUID pipe.
+   */
+  @Get('cycles')
+  cycles(@CurrentUser() user: AuthUser) {
+    return this.links.cycles(user.organizationId);
   }
 
   @Get()

@@ -4,6 +4,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuditService } from '../../common/audit/audit.service';
 import type { AuthUser, RequestContext } from '../../common/auth/current-user';
 import type { CreateApiKeyDto } from '../dto/integration.dto';
+import { EntitlementService } from '../../license/entitlement.service';
 
 export interface ValidatedApiKey {
   id: string;
@@ -18,6 +19,7 @@ export class ApiKeyService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   private hash(value: string): string {
@@ -44,6 +46,7 @@ export class ApiKeyService {
 
   /** Create a key and return the one-time plaintext secret alongside metadata. */
   async create(user: AuthUser, ctx: RequestContext, dto: CreateApiKeyDto): Promise<Record<string, unknown>> {
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxApiKeys', 1);
     const prefix = `e360_${randomBytes(4).toString('hex')}`; // e.g. e360_1a2b3c4d
     const secret = randomBytes(24).toString('base64url');
     const plaintext = `${prefix}.${secret}`;

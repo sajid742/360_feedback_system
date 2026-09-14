@@ -10,7 +10,7 @@ import { PasswordService } from '../../auth/services/password.service';
 import { ScopeService } from '../../rbac/scope.service';
 import { DEFAULT_EMPLOYEE_ROLE } from '../../rbac/system-roles';
 import { generateTemporaryPassword } from '../../rbac/temporary-password';
-import { LicenseService } from '../../license/license.service';
+import { EntitlementService } from '../../license/entitlement.service';
 import type {
   AssignMatrixDto,
   CreateEmployeeDto,
@@ -35,7 +35,7 @@ export class EmployeeService {
     private readonly audit: AuditService,
     private readonly scope: ScopeService,
     private readonly passwords: PasswordService,
-    private readonly license: LicenseService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async list(user: AuthUser, query: EmployeeQueryDto): Promise<Paginated<Record<string, unknown>>> {
@@ -71,9 +71,11 @@ export class EmployeeService {
   }
 
   async create(user: AuthUser, ctx: RequestContext, dto: CreateEmployeeDto): Promise<Record<string, unknown>> {
-    // Licence gate first, before any other validation, so a customer at their limit
-    // gets the licence message rather than an unrelated complaint about the payload.
-    await this.license.assertCanAddEmployees(user.organizationId, 1);
+    // Plan gate first, before any other validation, so a customer at their limit gets
+    // the plan message rather than an unrelated complaint about the payload. A new
+    // employee also gets a sign-in account, so both caps are checked.
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxEmployees', 1);
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxUsers', 1);
     await this.assertEmailFree(user.organizationId, dto.email);
     await this.assertCodeFree(user.organizationId, dto.employeeCode);
     if (dto.lineManagerId) await this.getOwned(user.organizationId, dto.lineManagerId);

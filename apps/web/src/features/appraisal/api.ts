@@ -6,6 +6,8 @@ export interface Cycle {
   status: string;
   startDate: string;
   endDate: string;
+  /** Feedback is accepted up to and including this day. Null means "until the cycle is closed". */
+  submissionDeadline: string | null;
   participants: number;
   sources: number;
 }
@@ -166,6 +168,17 @@ export const appraisalApi = {
   listCycles: (): Promise<Cycle[]> => apiClient.get('/appraisal/cycles'),
   createCycle: (input: { name: string; startDate: string; endDate: string; templateId?: string }): Promise<{ id: string }> =>
     apiClient.post('/appraisal/cycles', input),
+  /**
+   * Edit a draft or active cycle. Only the keys sent are changed, and
+   * `submissionDeadline: null` CLEARS the deadline rather than leaving it alone —
+   * which is how you say "collect feedback until I close this cycle by hand".
+   * A closed or archived cycle is refused by the API.
+   */
+  updateCycle: (
+    id: string,
+    input: { name?: string; startDate?: string; endDate?: string; submissionDeadline?: string | null },
+  ): Promise<Cycle & { templateId: string | null; ratingScaleId: string | null }> =>
+    apiClient.put(`/appraisal/cycles/${id}`, input),
   activate: (id: string): Promise<unknown> => apiClient.post(`/appraisal/cycles/${id}/activate`),
   /** Ends collection. A closed cycle accepts no further feedback and no roster changes. */
   close: (id: string): Promise<{ id: string; status: string }> =>

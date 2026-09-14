@@ -6,6 +6,7 @@ import { ProviderFactory } from '../providers/provider.factory';
 import { CommunicationSettingsService } from '../communication.settings';
 import { DeliveryQueue } from './delivery-queue.service';
 import type { Channel } from '../providers/types';
+import { EntitlementService } from '../../license/entitlement.service';
 
 export interface SendNotificationInput {
   channel: Channel;
@@ -26,6 +27,7 @@ export class NotificationService implements OnModuleInit {
     private readonly providers: ProviderFactory,
     private readonly settings: CommunicationSettingsService,
     private readonly queue: DeliveryQueue,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   onModuleInit(): void {
@@ -33,9 +35,18 @@ export class NotificationService implements OnModuleInit {
   }
 
   async send(orgId: string, createdBy: string | null, input: SendNotificationInput): Promise<{ id: string; status: string; error: string | null }> {
-    // Respect the per-channel enable/disable switch. A disabled channel records a
-    // 'skipped' notification (for auditability) but is never delivered.
-    const enabled = await this.settings.isChannelEnabled(orgId, input.channel);
+    /*
+     * Two gates, then the per-channel enable switch.
+     *
+     * BLOCKED, NOT THROWN. This method is the single funnel for every outbound message,
+     * including bulk runs that send hundreds in a loop. Throwing here would abort the
+     * whole run on the message that crossed the line; recording a 'blocked' row keeps
+     * the audit trail honest, lets the caller report exactly how many were sent, and
+     * matches what a disabled channel already does. Nothing is ever sent silently —
+     * the reason is on the row and visible in Communication.
+     */
+    const blocked = await this.planBlock(orgId, input.channel);
+    const enabled = blocked === null && (await this.settings.isChannelEnabled(orgId, input.channel));
     const row = await this.prisma.notification.create({
       data: {
         organizationId: orgId,
@@ -45,8 +56,8 @@ export class NotificationService implements OnModuleInit {
         subject: input.subject ?? null,
         body: input.body,
         templateKey: input.templateKey ?? null,
-        status: enabled ? 'queued' : 'skipped',
-        error: enabled ? null : 'Channel is disabled in Communication settings.',
+        status: enabled ? 'queued' : blocked ? 'blocked' : 'skipped',
+        error: enabled ? null : (blocked ?? 'Channel is disabled in Communication settings.'),
         createdBy,
       },
     });
@@ -71,6 +82,26 @@ export class NotificationService implements OnModuleInit {
       select: { status: true, error: true },
     });
     return { id: row.id, status: done?.status ?? row.status, error: done?.error ?? row.error ?? null };
+  }
+
+  /**
+   * Does the organisation's plan allow this message? Returns the reason to record, or
+   * null when it is permitted.
+   *
+   * Checked here rather than at each caller because there are a dozen callers and one
+   * funnel — a gate at the funnel cannot be forgotten.
+   */
+  private async planBlock(orgId: string, channel: Channel): Promise<string | null> {
+    const limits = await this.entitlements.limits(orgId);
+    if (!limits.channels.includes(channel)) {
+      return `Your plan does not include ${channel === 'sms' ? 'SMS' : channel === 'whatsapp' ? 'WhatsApp' : 'email'} delivery.`;
+    }
+    const key = channel === 'email' ? 'maxEmailsPerMonth' : channel === 'sms' ? 'maxSmsPerMonth' : 'maxWhatsAppPerMonth';
+    const cap = limits[key];
+    if (cap === null) return null;
+    const used = await this.entitlements.count(orgId, key);
+    if (used < cap) return null;
+    return `Your plan's monthly limit of ${cap} ${channel} messages has been reached.`;
   }
 
   /**

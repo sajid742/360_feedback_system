@@ -25,6 +25,24 @@ export class CreateCycleDto {
   @IsOptional() @IsUUID() ratingScaleId?: string;
 }
 
+/**
+ * Partial edit of an existing cycle — only the keys actually sent are applied.
+ *
+ * `submissionDeadline: null` is meaningful and allowed: it CLEARS the deadline,
+ * leaving the cycle open until someone closes it by hand. class-validator's
+ * `@IsOptional()` skips validation for `null` as well as `undefined`, which is what
+ * makes "clear it" expressible at all — and the service distinguishes the two with
+ * `'submissionDeadline' in dto`.
+ */
+export class UpdateCycleDto {
+  @IsOptional() @IsString() @Length(1, 200) name?: string;
+  @IsOptional() @IsDateString() startDate?: string;
+  @IsOptional() @IsDateString() endDate?: string;
+  @IsOptional() @IsDateString() submissionDeadline?: string | null;
+  @IsOptional() @IsUUID() templateId?: string;
+  @IsOptional() @IsUUID() ratingScaleId?: string;
+}
+
 export class AddSourceDto {
   @IsString() @Length(1, 40) code!: string;
   @IsString() @Length(1, 120) label!: string;

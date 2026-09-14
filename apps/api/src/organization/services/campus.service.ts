@@ -3,6 +3,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuditService } from '../../common/audit/audit.service';
 import type { AuthUser, RequestContext } from '../../common/auth/current-user';
 import type { CreateCampusDto, UpdateCampusDto } from '../dto/organization.dto';
+import { EntitlementService } from '../../license/entitlement.service';
 
 /**
  * Campuses are organization rows (org_type='campus') parented to the tenant root.
@@ -14,6 +15,7 @@ export class CampusService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async list(user: AuthUser): Promise<Record<string, unknown>[]> {
@@ -25,6 +27,7 @@ export class CampusService {
   }
 
   async create(user: AuthUser, ctx: RequestContext, dto: CreateCampusDto): Promise<{ id: string }> {
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxCampuses', 1);
     const clash = await this.prisma.organization.findUnique({ where: { slug: dto.slug }, select: { id: true } });
     if (clash) throw new ConflictException('This slug is already taken.');
     const row = await this.prisma.organization.create({

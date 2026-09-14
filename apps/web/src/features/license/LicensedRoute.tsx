@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { ShieldAlert } from 'lucide-react';
 import { Card } from '@/components/ui/card';
-import { useLicense } from './useLicense';
+import { useEntitlements } from './useEntitlements';
 
 /**
  * Wraps a route belonging to a licensed module.
@@ -15,26 +15,36 @@ import { useLicense } from './useLicense';
  * server-side regardless of what the browser does.
  */
 export function LicensedRoute({ module, children }: { module: string; children: React.ReactNode }): JSX.Element {
-  const { license, loading } = useLicense();
+  const { entitlements, loading } = useEntitlements();
 
-  // Until the status is known, render normally — the server is the real gate, and a
-  // flash of "not licensed" on every page load would be worse than a brief delay.
-  if (loading || !license) return <>{children}</>;
-  if (license.modules.some((m) => m.key === module)) return <>{children}</>;
+  // Until the plan is known, render normally — the server is the real gate, and a
+  // flash of "not included" on every page load would be worse than a brief delay.
+  if (loading || !entitlements) return <>{children}</>;
+  if (entitlements.modules.includes(module)) return <>{children}</>;
+
+  const entry = entitlements.catalogue.find((c) => c.module === module);
 
   return (
     <Card className="mx-auto mt-10 grid max-w-lg gap-3 p-8 text-center">
       <ShieldAlert className="mx-auto size-8 text-muted-foreground" />
-      <h1 className="text-lg font-extrabold tracking-tight">Not included in your licence</h1>
+      <h1 className="text-lg font-extrabold tracking-tight">
+        {entry?.label ?? 'This module'} is not included in your plan
+      </h1>
       <p className="text-sm text-muted-foreground">
-        This module is not part of the licence installed for this organisation, so it is unavailable
-        to everyone here. Your data is unaffected.
+        It is unavailable to everyone in this organisation, whatever their role. Your data is unaffected.
       </p>
+      {/* Name the plan that includes it rather than saying "contact your supplier" and
+          leaving the customer to guess. The answer comes from the server's own
+          catalogue, so it cannot drift away from what the guards enforce. */}
       <p className="text-sm text-muted-foreground">
-        <Link to="/license" className="font-semibold text-brand hover:underline">
-          View licence details
-        </Link>{' '}
-        or contact your supplier to add it.
+        {entry?.upgradeToLabel ? (
+          <>
+            Available from <b className="text-foreground">{entry.upgradeToLabel}</b>.{' '}
+          </>
+        ) : null}
+        <Link to="/upgrade" className="font-semibold text-brand hover:underline">
+          Compare plans
+        </Link>
       </p>
     </Card>
   );

@@ -32,6 +32,8 @@ import { HrIntegrationModule } from './hr-integration/hr-integration.module';
 import { HealthModule } from './health/health.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
 import { LicenseModule } from './license/license.module';
+import { PlatformModule } from './platform/platform.module';
+import { BillingModule } from './billing/billing.module';
 
 /**
  * Root module. Global PrismaModule + AuditModule are imported once; feature
@@ -70,6 +72,8 @@ import { LicenseModule } from './license/license.module';
     SisIntegrationModule,
     HealthModule,
     ProvisioningModule,
+    PlatformModule,
+    BillingModule,
   ],
   providers: [
     JwtStrategy,

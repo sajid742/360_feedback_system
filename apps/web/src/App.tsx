@@ -35,6 +35,8 @@ const AiPage = lazy(() => import('@/features/ai/AiPage').then((m) => ({ default:
 const IntegrationPage = lazy(() => import('@/features/integration/IntegrationPage').then((m) => ({ default: m.IntegrationPage })));
 const DevelopmentPage = lazy(() => import('@/features/development/DevelopmentPage').then((m) => ({ default: m.DevelopmentPage })));
 const CommunicationPage = lazy(() => import('@/features/communication/CommunicationPage').then((m) => ({ default: m.CommunicationPage })));
+const UpgradePage = lazy(() => import('@/features/license/UpgradePage').then((m) => ({ default: m.UpgradePage })));
+const SubscriptionPage = lazy(() => import('@/features/billing/SubscriptionPage').then((m) => ({ default: m.SubscriptionPage })));
 const SisEvaluationPage = lazy(() => import('@/features/external-evaluation/SisEvaluationPage').then((m) => ({ default: m.SisEvaluationPage })));
 const BulkGenerationPage = lazy(() => import('@/features/bulk-generation/BulkGenerationPage').then((m) => ({ default: m.BulkGenerationPage })));
 const AccessControlPage = lazy(() => import('@/features/rbac/AccessControlPage').then((m) => ({ default: m.AccessControlPage })));
@@ -98,6 +100,8 @@ export function App(): JSX.Element {
             <Route path="/communication" element={<LicensedRoute module="communication"><CommunicationPage /></LicensedRoute>} />
             <Route path="/sis-evaluations" element={<LicensedRoute module="parent_feedback"><SisEvaluationPage /></LicensedRoute>} />
             <Route path="/branding" element={<BrandStudioPage />} />
+            <Route path="/upgrade" element={<UpgradePage />} />
+            <Route path="/subscription" element={<SubscriptionPage />} />
             <Route path="/license" element={<LicensePage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/access-control" element={<AccessControlPage />} />

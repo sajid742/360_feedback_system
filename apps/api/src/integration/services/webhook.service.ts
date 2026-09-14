@@ -5,6 +5,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuditService } from '../../common/audit/audit.service';
 import type { AuthUser, RequestContext } from '../../common/auth/current-user';
 import type { CreateWebhookDto, UpdateWebhookDto } from '../dto/integration.dto';
+import { EntitlementService } from '../../license/entitlement.service';
 
 /** Outbound webhooks: tenant-registered HTTPS endpoints receive HMAC-SHA256
  *  signed JSON when a subscribed domain event fires. Delivery is best-effort
@@ -16,6 +17,7 @@ export class WebhookService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   private mask(secret: string): string {
@@ -39,6 +41,7 @@ export class WebhookService {
   }
 
   async create(user: AuthUser, ctx: RequestContext, dto: CreateWebhookDto): Promise<Record<string, unknown>> {
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxWebhooks', 1);
     const secret = `whsec_${randomBytes(24).toString('base64url')}`;
     const row = await this.prisma.webhookEndpoint.create({
       data: {

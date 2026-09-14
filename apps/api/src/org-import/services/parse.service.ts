@@ -56,11 +56,21 @@ const COLUMN_ALIASES: Record<string, Record<string, string[]>> = {
   },
 };
 
+/**
+ * Sheet names that mean "one flat list of staff" rather than "the Employees sheet of
+ * the multi-sheet workbook". Same idea as the SIS importer's Roster sheet: the columns
+ * are identical to Employees, but the master data referenced in them is DERIVED
+ * instead of being required to exist already. See services/staff-expand.ts.
+ */
+const FLAT_SHEET_ALIASES = ['staff', 'stafflist', 'flat', 'flatstaff', 'employeesflat', 'staffdata', 'hrdata', 'people'];
+
 interface ParsedInput {
   filename: string;
   contentBase64: string;
   /** Required for CSV (single sheet): which entity the file represents. */
   entity?: ImportEntity;
+  /** Treat an employees file as the flat Staff sheet (CSV has no sheet name to go on). */
+  flat?: boolean;
 }
 
 function norm(s: string): string {
@@ -70,10 +80,13 @@ function norm(s: string): string {
 @Injectable()
 export class ParseService {
   /** Parse an uploaded CSV/Excel file into the normalized ImportDataset. */
-  async parse(input: ParsedInput): Promise<{ dataset: ImportDataset; sheetsFound: ImportEntity[] }> {
+  async parse(input: ParsedInput): Promise<{ dataset: ImportDataset; sheetsFound: ImportEntity[]; flat: boolean }> {
     const buffer = this.decode(input.contentBase64);
     const isCsv = /\.csv$/i.test(input.filename);
     const sheets: Partial<Record<ImportEntity, Record<string, string>[]>> = {};
+    // A flat file is still an EMPLOYEES file — same columns, same entity, same upsert.
+    // The only difference is that its master data is derived rather than required.
+    let flat = input.flat === true;
 
     if (isCsv) {
       if (!input.entity) throw new BadRequestException('For a CSV upload, specify which entity it contains (e.g. employees).');
@@ -86,13 +99,19 @@ export class ParseService {
         throw new BadRequestException('Could not read the Excel file. Upload a valid .xlsx workbook or a .csv file.');
       }
       wb.eachSheet((ws) => {
-        const entity = this.matchEntity(ws.name);
+        const isFlatSheet = FLAT_SHEET_ALIASES.includes(norm(ws.name));
+        const entity = isFlatSheet ? 'employees' : this.matchEntity(ws.name);
         if (!entity) return;
-        const rows = this.sheetToObjects(ws);
-        if (rows.length) sheets[entity] = rows;
+        const rows = this.sheetToObjects(ws, entity);
+        if (!rows.length) return;
+        // A workbook holding both Staff and Employees would be ambiguous about which
+        // list is authoritative, so the flat sheet only ever ADDS to employees and the
+        // file counts as flat if any sheet asked for it.
+        sheets[entity] = [...(sheets[entity] ?? []), ...rows];
+        if (isFlatSheet) flat = true;
       });
       if (Object.keys(sheets).length === 0) {
-        throw new BadRequestException('No recognised sheets found. Use the provided template (sheets: Campuses, Departments, Designations, Employees, Competencies).');
+        throw new BadRequestException('No recognised sheets found. Use the provided template — either the single "Staff" sheet, or the workbook sheets Campuses, Departments, Designations, Employees, Competencies.');
       }
     }
 
@@ -104,7 +123,7 @@ export class ParseService {
       employees: (sheets.employees ?? []).map((r, i) => this.mapEmployee(r, i)).filter((r): r is EmployeeRow => r !== null),
       competencies: (sheets.competencies ?? []).map((r, i) => this.mapCompetency(r, i)).filter((r): r is CompetencyRow => r !== null),
     };
-    return { dataset, sheetsFound: Object.keys(sheets) as ImportEntity[] };
+    return { dataset, sheetsFound: Object.keys(sheets) as ImportEntity[], flat };
   }
 
   private decode(b64: string): Buffer {
@@ -125,13 +144,13 @@ export class ParseService {
   }
 
   /** Convert an exceljs worksheet to header-keyed row objects (canonical field keys). */
-  private sheetToObjects(ws: import('exceljs').Worksheet): Record<string, string>[] {
+  private sheetToObjects(ws: import('exceljs').Worksheet, forEntity?: ImportEntity): Record<string, string>[] {
     const headerRow = ws.getRow(1);
     const headers: (string | null)[] = [];
     headerRow.eachCell({ includeEmpty: true }, (cell, col) => {
       headers[col] = this.cellText(cell.value);
     });
-    const entity = this.matchEntity(ws.name);
+    const entity = forEntity ?? this.matchEntity(ws.name);
     const aliasMap = entity ? COLUMN_ALIASES[entity] : {};
     const colToField = new Map<number, string>();
     headers.forEach((h, col) => {

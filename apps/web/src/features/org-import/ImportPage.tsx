@@ -26,6 +26,9 @@ export function ImportPage(): JSX.Element {
   const [step, setStep] = useState<'upload' | 'review' | 'done'>('upload');
   const [file, setFile] = useState<File | null>(null);
   const [csvEntity, setCsvEntity] = useState<ImportEntity>('employees');
+  // A flat staff CSV is still an employees file; the flag only changes whether the
+  // master data it references is derived or required.
+  const [flatCsv, setFlatCsv] = useState(true);
   const [mode, setMode] = useState<ImportMode>('skip');
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [imported, setImported] = useState<ImportResult | null>(null);
@@ -44,7 +47,13 @@ export function ImportPage(): JSX.Element {
     setBusy(true); setError(null);
     try {
       const contentBase64 = await fileToBase64(file);
-      const res = await orgImportApi.validate({ filename: file.name, contentBase64, entity: isCsv ? csvEntity : undefined, mode });
+      const res = await orgImportApi.validate({
+        filename: file.name,
+        contentBase64,
+        entity: isCsv ? csvEntity : undefined,
+        flat: isCsv && csvEntity === 'employees' ? flatCsv : undefined,
+        mode,
+      });
       setResult(res); setStep('review'); setAck(false);
     } catch (e) { setError(e instanceof ApiError ? e.message : 'Validation failed.'); }
     finally { setBusy(false); }
@@ -98,14 +107,44 @@ export function ImportPage(): JSX.Element {
         <Card className="grid gap-4 p-5">
           <div>
             <h2 className="text-sm font-bold">1 · Download a template</h2>
-            <p className="text-sm text-muted-foreground">Fill in the sheets and upload the workbook. Import employees with a <code>managerCode</code> (Reporting To); the hierarchy is resolved automatically.</p>
+            <p className="text-sm text-muted-foreground">Two templates, one importer. Pick the shape your data is already in.</p>
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => orgImportApi.downloadTemplate('xlsx')}><Download className="size-4" /> Excel template (all sheets)</Button>
+              <Button variant="outline" size="sm" onClick={() => orgImportApi.downloadStaffTemplate('xlsx')}><Download className="size-4" /> Staff list (1 sheet)</Button>
+              <Button variant="outline" size="sm" onClick={() => orgImportApi.downloadTemplate('xlsx')}><Download className="size-4" /> Full template (all sheets)</Button>
               <span className="text-xs text-muted-foreground">or a single-sheet CSV:</span>
               {ENTITIES.map((e) => (
                 <Button key={e} variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => orgImportApi.downloadTemplate('csv', e)}>{e}.csv</Button>
               ))}
             </div>
+            {/*
+              The single sheet is not a cut-down version. It carries the same columns as
+              the Employees sheet; what it adds is that the departments, designations and
+              campuses named in it are CREATED from the list, so an HR user with one staff
+              export does not have to hand-build three more sheets to satisfy referential
+              integrity. Same importer, same validation, same upsert on employee code.
+            */}
+            <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+              <div className="rounded-md border border-border p-2.5">
+                <div className="font-semibold text-foreground">Staff list — one sheet</div>
+                <strong>One row per employee.</strong> Departments, designations and campuses are created
+                automatically from what you type in those columns, so there is nothing to set up first.
+                The preview tells you exactly which new records it is about to create. Use this if you
+                have a staff list and nothing else.
+              </div>
+              <div className="rounded-md border border-border p-2.5">
+                <div className="font-semibold text-foreground">Full template — all sheets</div>
+                Organization, Campuses, Departments, Designations, Employees and Competencies as separate
+                sheets. Use it when you need parent departments, seniority levels or promotion paths —
+                things a staff list cannot express. Same result, same importer.
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Either way, an employee is matched on <code>Employee Code</code>: importing the same person
+              again updates them and never creates a second record, so their appraisal history and the
+              feedback already collected about them stay attached. Choose <strong>Insert new + update
+              existing</strong> below to apply changes to people who already exist. On an update, a blank
+              cell leaves the stored value alone.
+            </p>
           </div>
 
           {/* Export the CURRENT data in the same layout — round-trippable (F-H6). */}
@@ -136,6 +175,19 @@ export function ImportPage(): JSX.Element {
                 </label>
               )}
             </div>
+            {/* An .xlsx says so by naming its sheet "Staff"; a CSV has no sheet name. */}
+            {isCsv && csvEntity === 'employees' && (
+              <label className="mt-2 flex items-start gap-2 text-sm text-muted-foreground">
+                <input type="checkbox" checked={flatCsv} onChange={(e) => setFlatCsv(e.target.checked)} className="mt-0.5" />
+                <span>
+                  Create any departments, designations and campuses this file names
+                  <span className="block text-xs">
+                    Leave it ticked for a plain staff list. Untick it to require that they already exist,
+                    which catches typos but means setting them up first.
+                  </span>
+                </span>
+              </label>
+            )}
           </div>
 
           <div className="border-t border-border pt-4">

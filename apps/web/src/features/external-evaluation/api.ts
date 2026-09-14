@@ -168,6 +168,22 @@ export const identityApi = {
 };
 
 // Admin endpoints
+
+/**
+ * A cycle offered by the Parent Evaluations page. `selectable` is true only for
+ * active cycles — the others are returned so an existing link can be labelled with
+ * the name of a cycle that has since closed.
+ */
+export interface EvalCycle {
+  id: string;
+  name: string;
+  status: string;
+  startDate: string;
+  endDate: string;
+  submissionDeadline: string | null;
+  selectable: boolean;
+}
+
 /** What a consolidated link returns to the admin who generated it. */
 export interface ConsolidatedLink extends EvaluationLink {
   mode: 'consolidated';
@@ -177,6 +193,11 @@ export interface ConsolidatedLink extends EvaluationLink {
 }
 
 export const evalAdminApi = {
+  /**
+   * Cycles for the page's cycle picker, active first then newest first. Served by the
+   * external-evaluation module itself, so this page does not require `appraisal.read`.
+   */
+  cycles: (): Promise<EvalCycle[]> => apiClient.get('/external-evaluation/cycles'),
   /** One consolidated form per student, covering every teacher that student has. */
   createConsolidated: (input: {
     studentId: string;
@@ -201,14 +222,19 @@ export const evalAdminApi = {
     send?: boolean;
     channel?: 'whatsapp' | 'email' | 'sms';
     recipient?: string;
+    /** Always pass this: several cycles can be active at once. */
+    cycleId?: string;
   }): Promise<EvaluationLink> => apiClient.post('/external-evaluation', input),
   list: (studentId?: string): Promise<EvaluationLink[]> =>
     apiClient.get('/external-evaluation', studentId ? { studentId } : undefined),
   revoke: (id: string): Promise<EvaluationLink> => apiClient.post(`/external-evaluation/${id}/revoke`),
   /**
-   * `force` is required only for a link the parent has already submitted: re-issuing
-   * discards their responses and score, so the API refuses without it.
+   * Re-issue a link. `force` is required by the API when the parent has ALREADY
+   * submitted, because re-issuing permanently discards their responses and score —
+   * see the two-click confirm in SisEvaluationPage.
    */
-  regenerate: (id: string, body?: { channel?: 'whatsapp' | 'email' | 'sms'; recipient?: string; force?: boolean }): Promise<EvaluationLink> =>
-    apiClient.post(`/external-evaluation/${id}/regenerate`, body ?? {}),
+  regenerate: (
+    id: string,
+    body?: { channel?: 'whatsapp' | 'email' | 'sms'; recipient?: string; force?: boolean },
+  ): Promise<EvaluationLink> => apiClient.post(`/external-evaluation/${id}/regenerate`, body ?? {}),
 };

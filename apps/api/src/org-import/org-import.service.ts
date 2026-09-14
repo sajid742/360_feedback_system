@@ -7,9 +7,11 @@ import { ParseService } from './services/parse.service';
 import { ResolverService } from './services/resolver.service';
 import { ValidationService } from './services/validation.service';
 import { ImportService, type ImportOptions } from './services/import.service';
+import { expandStaff } from './services/staff-expand';
 import type { ImportDataset, ImportEntity, ImportMode, ValidationResult } from './org-import.types';
+import { EntitlementService } from '../license/entitlement.service';
 
-interface UploadInput { filename: string; contentBase64: string; entity?: ImportEntity; mode?: ImportMode }
+interface UploadInput { filename: string; contentBase64: string; entity?: ImportEntity; mode?: ImportMode; flat?: boolean }
 
 @Injectable()
 export class OrgImportService {
@@ -20,13 +22,23 @@ export class OrgImportService {
     private readonly resolver: ResolverService,
     private readonly validation: ValidationService,
     private readonly importer: ImportService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   /** Upload → Validate → Preview: parse, validate against existing data, persist a job. */
   async validateUpload(user: AuthUser, ctx: RequestContext, input: UploadInput): Promise<Record<string, unknown>> {
-    const { dataset, sheetsFound } = await this.parser.parse(input);
+    const parsed = await this.parser.parse(input);
+    const sheetsFound = parsed.sheetsFound;
+    // The flat Staff sheet is unfolded ONCE, here, and the expanded dataset is what is
+    // stored on the job. Everything after this point — preview, re-validation at
+    // confirm, the import itself — sees an ordinary multi-entity dataset and needs no
+    // knowledge that the file was flat.
+    const dataset = parsed.flat ? expandStaff(parsed.dataset) : parsed.dataset;
     const totalRows = dataset.campuses.length + dataset.departments.length + dataset.designations.length + dataset.employees.length + dataset.competencies.length;
     if (totalRows === 0) throw new BadRequestException('The file contained no data rows to import.');
+    // Bounds one request rather than a stock, so it is checked here at validation — the
+    // uploader learns immediately rather than after a long preview.
+    await this.entitlements.assertImportRows(user.organizationId, totalRows);
     const existing = await this.resolver.loadExisting(user.organizationId);
     const mode = input.mode ?? 'skip';
     const result = this.validation.build(dataset, existing, mode);
@@ -42,9 +54,9 @@ export class OrgImportService {
         validation: result as unknown as Prisma.InputJsonValue,
       },
     });
-    await this.audit.record({ organizationId: user.organizationId, userId: user.userId, action: 'organization.import.validate', entityType: 'organization_import', entityId: job.id, newValue: { filename: input.filename, sheetsFound, errors: result.errors.length, warnings: result.warnings.length }, ip: ctx.ip, device: ctx.device });
+    await this.audit.record({ organizationId: user.organizationId, userId: user.userId, action: 'organization.import.validate', entityType: 'organization_import', entityId: job.id, newValue: { filename: input.filename, sheetsFound, flat: parsed.flat, errors: result.errors.length, warnings: result.warnings.length }, ip: ctx.ip, device: ctx.device });
 
-    return { jobId: job.id, filename: input.filename, sheetsFound, ...result, existing: this.existingSummary(existing), activeCycleCount: existing.activeCycleCount };
+    return { jobId: job.id, filename: input.filename, sheetsFound, flat: parsed.flat, ...result, existing: this.existingSummary(existing), activeCycleCount: existing.activeCycleCount };
   }
 
   /** Recompute the create/update/skip plan for a different mode without re-uploading. */

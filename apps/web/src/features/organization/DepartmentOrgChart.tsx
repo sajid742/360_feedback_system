@@ -102,6 +102,10 @@ function accentFor(dept: DepartmentNode, depth: number): Accent {
   );
 }
 
+/** Filter sentinel for units belonging to no campus. Not a campus name, so it cannot
+ *  collide with one. */
+const NO_CAMPUS = '\u0000none';
+
 /* ------------------------------------------------------------------ */
 /* Custom node card.                                                   */
 /* ------------------------------------------------------------------ */
@@ -162,6 +166,14 @@ const DeptCard = memo(({ data }: NodeProps): JSX.Element => {
         </div>
 
         <div className="mt-auto min-w-0">
+          {/* Campus, when the unit has one. Org-wide units have none and say nothing —
+              an explicit "no campus" line would be noise on 14 of 36 units here. */}
+          {dept.campusName ? (
+            <p className="truncate text-[11px] text-muted-foreground" title={`Campus: ${dept.campusName}`}>
+              <Building2 className="mr-0.5 inline size-3" />
+              {dept.campusName}
+            </p>
+          ) : null}
           {dept.hodName ? (
             <p className="truncate text-xs" title={`${dept.hodName} — ${dept.hodDesignation ?? ''}`}>
               <span className="font-medium text-foreground">{dept.hodName}</span>
@@ -305,6 +317,9 @@ function ChartInner({ roots, onOpen }: { roots: DepartmentNode[]; onOpen: (d: De
   const wrapRef = useRef<HTMLDivElement>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(SAVED_COLLAPSED ?? []));
   const [query, setQuery] = useState('');
+  // '' = every campus. NO_CAMPUS isolates the org-wide units, which is a real question
+  // to ask of this data: here 14 of 36 units belong to no campus at all.
+  const [campus, setCampus] = useState('');
   const [isFull, setIsFull] = useState(false);
 
   useEffect(() => {
@@ -320,20 +335,44 @@ function ChartInner({ roots, onOpen }: { roots: DepartmentNode[]; onOpen: (d: De
     });
   }, []);
 
+  /** Campus names present anywhere in the tree, for the filter. */
+  const campusOptions = useMemo(() => {
+    const set = new Set<string>();
+    let anyUnassigned = false;
+    const walk = (n: DepartmentNode): void => {
+      if (n.campusName) set.add(n.campusName);
+      else anyUnassigned = true;
+      n.children.forEach(walk);
+    };
+    roots.forEach(walk);
+    return { names: [...set].sort((a, b) => a.localeCompare(b)), anyUnassigned };
+  }, [roots]);
+
   // Matches + forced ancestor expansion for search.
   const q = query.trim().toLowerCase();
+  // Either filter narrows the chart; together they intersect.
+  const filtering = q.length > 0 || campus.length > 0;
   const matches = useMemo(() => {
     const set = new Set<string>();
-    if (!q) return set;
+    if (!filtering) return set;
     const walk = (n: DepartmentNode): void => {
       const hay = `${n.name} ${n.hodName ?? ''} ${n.hodDesignation ?? ''}`.toLowerCase();
-      if (hay.includes(q)) set.add(n.id);
+      const okQuery = !q || hay.includes(q);
+      const okCampus = !campus || (campus === NO_CAMPUS ? !n.campusName : n.campusName === campus);
+      if (okQuery && okCampus) set.add(n.id);
       n.children.forEach(walk);
     };
     roots.forEach(walk);
     return set;
-  }, [roots, q]);
-  const forceExpand = useMemo(() => (q ? ancestorsOfMatches(roots, matches) : new Set<string>()), [roots, matches, q]);
+  }, [roots, q, campus, filtering]);
+  /*
+   * Ancestors of a match stay VISIBLE rather than being filtered out. That is not a
+   * compromise, it is what this data requires: a unit's campus can differ from its
+   * parent's (12 of 22 parent/child pairs here), so hiding non-matching ancestors would
+   * detach matching units from the tree they actually hang off. Matches are highlighted,
+   * everything else is dimmed — the same behaviour search already had.
+   */
+  const forceExpand = useMemo(() => (filtering ? ancestorsOfMatches(roots, matches) : new Set<string>()), [roots, matches, filtering]);
 
   const { nodes, edges } = useMemo(() => {
     const { flat, edges: rawEdges } = flatten(roots, collapsed, forceExpand);
@@ -347,25 +386,25 @@ function ChartInner({ roots, onOpen }: { roots: DepartmentNode[]; onOpen: (d: De
         collapsed: f.collapsed,
         hiddenCount: f.hiddenCount,
         matched: matches.has(f.dept.id),
-        dimmed: q.length > 0 && !matches.has(f.dept.id),
+        dimmed: filtering && !matches.has(f.dept.id),
         onToggle: toggle,
         onOpen,
       };
       return { ...n, data };
     });
     return { nodes, edges: laid.edges };
-  }, [roots, collapsed, forceExpand, matches, q, toggle, onOpen]);
+  }, [roots, collapsed, forceExpand, matches, filtering, toggle, onOpen]);
 
   // Fit the view when the visible set changes; when searching, fit to matches.
   const nodeIdsKey = nodes.map((n) => n.id).join(',');
   useEffect(() => {
     const t = setTimeout(() => {
-      const target = q ? nodes.filter((n) => matches.has(n.id)) : undefined;
+      const target = filtering ? nodes.filter((n) => matches.has(n.id)) : undefined;
       rf.fitView({ padding: 0.2, duration: 400, ...(target && target.length ? { nodes: target } : {}) });
     }, 60);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeIdsKey, q]);
+  }, [nodeIdsKey, q, campus]);
 
   const expandAll = useCallback(() => setCollapsed(new Set()), []);
   const collapseAll = useCallback(() => {
@@ -440,9 +479,24 @@ function ChartInner({ roots, onOpen }: { roots: DepartmentNode[]; onOpen: (d: De
               </button>
             ) : null}
           </div>
-          {q ? (
+          {campusOptions.names.length > 0 || campusOptions.anyUnassigned ? (
+            <select
+              value={campus}
+              onChange={(e) => setCampus(e.target.value)}
+              title="Show only units at one campus"
+              className="mt-2 h-9 w-64 rounded-lg border border-input bg-card px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="">All campuses</option>
+              {campusOptions.names.map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+              {campusOptions.anyUnassigned ? <option value={NO_CAMPUS}>No campus assigned</option> : null}
+            </select>
+          ) : null}
+          {filtering ? (
             <div className="mt-1 rounded-md bg-card/90 px-2 py-1 text-xs text-muted-foreground shadow-sm">
               {matches.size} match{matches.size === 1 ? '' : 'es'}
+              {campus ? ` · ${campus === NO_CAMPUS ? 'no campus' : campus}` : ''}
             </div>
           ) : null}
         </Panel>

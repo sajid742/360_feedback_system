@@ -74,6 +74,22 @@ export interface AiStatus {
   model: string | null;
 }
 
+/** The provider settings, as an administrator is allowed to see them back. */
+export interface AiProviderView {
+  configured: boolean;
+  enabled: boolean;
+  baseUrl: string | null;
+  model: string | null;
+  /** The last four characters of the stored key — never the key itself. */
+  apiKeyHint: string | null;
+}
+
+export interface AiProviderTest {
+  ok: boolean;
+  model: string | null;
+  detail: string;
+}
+
 function q(cycleId?: string): { cycleId?: string } {
   return cycleId ? { cycleId } : {};
 }
@@ -83,4 +99,16 @@ export const aiApi = {
   overview: (cycleId?: string): Promise<Overview> => apiClient.get('/ai/overview', q(cycleId)),
   insights: (employeeId: string, cycleId?: string): Promise<Insights> =>
     apiClient.get(`/ai/insights/${employeeId}`, q(cycleId)),
+
+  // Provider settings. `apiKey` is write-only: it is never returned, and it is omitted
+  // on save to keep whatever is already stored.
+  provider: (): Promise<AiProviderView> => apiClient.get('/ai/provider'),
+  saveProvider: (body: {
+    baseUrl: string;
+    apiKey?: string;
+    model?: string;
+    enabled?: boolean;
+  }): Promise<AiProviderView> => apiClient.put('/ai/provider', body),
+  removeProvider: (): Promise<AiProviderView> => apiClient.delete('/ai/provider'),
+  testProvider: (): Promise<AiProviderTest> => apiClient.post('/ai/provider/test', {}),
 };

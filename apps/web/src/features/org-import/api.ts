@@ -9,6 +9,8 @@ export interface ValidationResult {
   jobId: string;
   filename?: string;
   sheetsFound?: ImportEntity[];
+  /** True when the file was read as the flat one-sheet Staff list. */
+  flat?: boolean;
   counts: EntityCount[];
   errors: ValidationIssue[];
   warnings: ValidationIssue[];
@@ -25,7 +27,19 @@ export interface ImportResult {
   verify: Record<string, number>;
 }
 
-export interface UploadPayload { filename: string; contentBase64: string; entity?: ImportEntity; mode?: ImportMode }
+export interface UploadPayload {
+  filename: string;
+  contentBase64: string;
+  entity?: ImportEntity;
+  mode?: ImportMode;
+  /**
+   * Treat an employees file as the flat Staff list: the Departments, Designations and
+   * Campuses it names are created from the list instead of having to exist first. An
+   * .xlsx whose sheet is called "Staff" sets this server-side; a CSV has no sheet name
+   * to go on, so the page says so explicitly.
+   */
+  flat?: boolean;
+}
 export interface ConfirmPayload { mode: ImportMode; confirmDestructive?: boolean; defaultPassword?: string }
 
 export const orgImportApi = {
@@ -35,6 +49,9 @@ export const orgImportApi = {
   downloadReport: (jobId: string): Promise<void> => apiClient.download(`/org-import/${jobId}/report`, 'import-report.csv'),
   downloadTemplate: (format: 'xlsx' | 'csv', entity?: ImportEntity): Promise<void> =>
     apiClient.download('/org-import/template/download', format === 'xlsx' ? 'organization-import-template.xlsx' : `import-template-${entity}.csv`, { format, entity }),
+  /** The flat one-sheet staff list — the HR twin of the SIS single-sheet roster. */
+  downloadStaffTemplate: (format: 'xlsx' | 'csv' = 'xlsx'): Promise<void> =>
+    apiClient.download('/org-import/template/download', format === 'xlsx' ? 'staff-list-flat.xlsx' : 'staff-list-flat.csv', { format, variant: 'staff' }),
 
   /** Export current organization data in the same layout as the import template (F-H6). */
   exportData: (format: 'xlsx' | 'csv' = 'xlsx', entity = 'Employees'): Promise<void> => {

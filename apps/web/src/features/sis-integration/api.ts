@@ -52,6 +52,14 @@ export const sisApi = {
   testConnection: (): Promise<TestResult> => apiClient.post('/sis-integration/test', {}),
   sync: (live: boolean, confirm = false): Promise<SisApplyResult> => apiClient.post('/sis-integration/sync', { live, confirm }),
   import: (body: { filename: string; base64: string; entity?: string; dryRun: boolean; confirm?: boolean }): Promise<SisApplyResult> => apiClient.post('/sis-integration/import', body),
-  downloadTemplate: (): Promise<void> => apiClient.download('/sis-integration/template', 'sis-import-template.xlsx'),
+  /**
+   * 'simple' is the one-sheet flat roster (one row per student x subject); 'full' is
+   * the five-sheet workbook. Both are read by the same importer and both can carry the
+   * complete student -> subject -> teacher chain.
+   */
+  downloadTemplate: (variant: 'full' | 'simple' = 'full'): Promise<void> =>
+    variant === 'simple'
+      ? apiClient.download('/sis-integration/template', 'student-roster-flat.xlsx', { variant: 'simple' })
+      : apiClient.download('/sis-integration/template', 'sis-import-template.xlsx'),
   downloadReport: (runId: string): Promise<void> => apiClient.download(`/sis-integration/${runId}/report`, 'sis-sync-report.csv'),
 };

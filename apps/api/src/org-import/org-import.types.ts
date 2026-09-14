@@ -16,10 +16,19 @@ export type ImportMode =
   | 'replace' // wipe existing org structural data, then insert (destructive)
   | 'reset'; // wipe existing org structural data only, import nothing (destructive)
 
+/**
+ * Set on a master-data row that the flat Staff sheet DERIVED from an employee row
+ * rather than the user typing it on its own sheet. Carried through the stored job so
+ * validation can warn "this department will be created", and so the preview shows
+ * exactly what the one-sheet file implies. `_variants` lists other spellings in the
+ * file that folded onto the same record.
+ */
+export interface DerivedMeta { _derived?: boolean; _variants?: string[] }
+
 export interface OrganizationRow { name?: string; slug?: string; status?: string }
-export interface CampusRow { name: string; slug?: string; status?: string; _row: number }
-export interface DepartmentRow { name: string; parent?: string; campus?: string; unitType?: string; _row: number }
-export interface DesignationRow { name: string; level?: number; promotesTo?: string; _row: number }
+export interface CampusRow extends DerivedMeta { name: string; slug?: string; status?: string; _row: number }
+export interface DepartmentRow extends DerivedMeta { name: string; parent?: string; campus?: string; unitType?: string; _row: number }
+export interface DesignationRow extends DerivedMeta { name: string; level?: number; promotesTo?: string; _row: number }
 export interface EmployeeRow {
   employeeCode: string; fullName?: string; email?: string;
   department?: string; designation?: string; campus?: string;

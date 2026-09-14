@@ -4,6 +4,7 @@ import { AuditService } from '../../common/audit/audit.service';
 import type { AuthUser, RequestContext } from '../../common/auth/current-user';
 import { wouldCreateCycle } from '../cycle-guard';
 import type { CreateDepartmentDto, UpdateDepartmentDto } from '../dto/organization.dto';
+import { EntitlementService } from '../../license/entitlement.service';
 
 interface DeptNode {
   id: string;
@@ -23,6 +24,7 @@ export class DepartmentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   /**
@@ -110,6 +112,7 @@ export class DepartmentService {
   }
 
   async create(user: AuthUser, ctx: RequestContext, dto: CreateDepartmentDto): Promise<{ id: string }> {
+    await this.entitlements.assertWithinLimit(user.organizationId, 'maxDepartments', 1);
     if (dto.parentId) await this.getOwned(user.organizationId, dto.parentId);
     const row = await this.prisma.department.create({
       data: {

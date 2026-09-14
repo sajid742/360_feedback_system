@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Send, Link2, Ban, RefreshCw, Copy, Users } from 'lucide-react';
+import { Send, Link2, Ban, RefreshCw, Copy, Users, CalendarClock, AlertTriangle } from 'lucide-react';
 import { Badge, type BadgeVariant } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -12,6 +12,7 @@ import { TeacherMappingPanel } from './TeacherMappingPanel';
 import {
   evalAdminApi,
   sisApi,
+  type EvalCycle,
   type EvaluationLink,
   type SisParent,
   type SisStudent,
@@ -30,13 +31,46 @@ const STATUS_VARIANT: Record<string, BadgeVariant> = {
 const selectClass =
   'h-10 rounded-md border border-input bg-card px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
 
+/** A `date` column arrives as midnight UTC, so the calendar day is the first ten characters. */
+const day = (value: string | null): string => (value ? value.slice(0, 10) : '');
+
+/**
+ * Name a cycle by id. Closed and draft cycles are returned by the endpoint alongside
+ * the selectable ones precisely so an old link can be named rather than showing a
+ * bare uuid; a cycle deleted since is the only case that falls through.
+ */
+function cycleName(cycles: EvalCycle[] | null, id: string): string {
+  return cycles?.find((c) => c.id === id)?.name ?? 'another cycle';
+}
+
+/** Today as `YYYY-MM-DD`, for comparing calendar days rather than instants. */
+function todayKey(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export function SisEvaluationPage(): JSX.Element {
   const [students, setStudents] = useState<SisStudent[] | null>(null);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<SisStudent | null>(null);
+  // Which cycle new links are generated into. Several cycles can be active at once,
+  // and the page used to say nothing at all about which one it was using — the server
+  // silently took the most recently started active one.
+  const [cycles, setCycles] = useState<EvalCycle[] | null>(null);
+  const [cycleId, setCycleId] = useState<string>('');
 
   useEffect(() => {
     sisApi.students().then(setStudents).catch(() => setStudents([]));
+    evalAdminApi
+      .cycles()
+      .then((list) => {
+        setCycles(list);
+        // The first selectable row is exactly the cycle the server falls back to, so
+        // the default selection changes nothing about existing behaviour — it only
+        // makes the choice visible, and changeable.
+        setCycleId((current) => current || list.find((c) => c.selectable)?.id || '');
+      })
+      .catch(() => setCycles([]));
   }, []);
 
   const filtered = useMemo(() => {
@@ -65,7 +99,8 @@ export function SisEvaluationPage(): JSX.Element {
           <TeacherMappingPanel />
         </TabsContent>
         <TabsContent value="generate">
-          <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
+          <CyclePicker cycles={cycles} cycleId={cycleId} onChange={setCycleId} />
+          <div className="mt-6 grid gap-6 lg:grid-cols-[320px_1fr]">
         <Card className="p-4">
           <Label htmlFor="stu-search">Find a student</Label>
           <Input id="stu-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name or registration no." className="mt-2" />
@@ -93,7 +128,7 @@ export function SisEvaluationPage(): JSX.Element {
           </div>
         </Card>
 
-            {selected ? <StudentPanel student={selected} /> : (
+            {selected ? <StudentPanel student={selected} cycleId={cycleId} cycles={cycles} /> : (
               <Card className="grid place-items-center p-10 text-sm text-muted-foreground">Select a student to begin.</Card>
             )}
           </div>
@@ -103,7 +138,102 @@ export function SisEvaluationPage(): JSX.Element {
   );
 }
 
-function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
+/**
+ * Which cycle parent feedback is being collected for.
+ *
+ * Page-level rather than per-student: the answer is the same whichever child is
+ * selected, and keeping it here means it survives switching between students and is
+ * visible before one is picked at all.
+ */
+function CyclePicker({
+  cycles,
+  cycleId,
+  onChange,
+}: {
+  cycles: EvalCycle[] | null;
+  cycleId: string;
+  onChange: (id: string) => void;
+}): JSX.Element {
+  if (!cycles) return <Skeleton className="h-20 w-full" />;
+
+  const selectable = cycles.filter((c) => c.selectable);
+  const current = cycles.find((c) => c.id === cycleId) ?? null;
+
+  if (selectable.length === 0) {
+    return (
+      <Card className="flex flex-wrap items-center gap-2 border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+        <AlertTriangle className="size-4 shrink-0" />
+        <span>
+          <b>No active feedback cycle.</b> Parent evaluations are collected into a cycle, so nothing can be generated
+          until one is active. Open <b>Appraisals &rarr; Cycles</b> and activate the cycle this feedback belongs to.
+        </span>
+      </Card>
+    );
+  }
+
+  const deadline = day(current?.submissionDeadline ?? null);
+  const passed = !!deadline && deadline < todayKey();
+
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
+        <div className="grid gap-1">
+          <Label htmlFor="eval-cycle" className="text-xs">
+            Feedback cycle
+          </Label>
+          <select
+            id="eval-cycle"
+            value={cycleId}
+            onChange={(e) => onChange(e.target.value)}
+            className={selectClass}
+            title="Parent feedback generated below is collected into this cycle"
+          >
+            {selectable.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="pb-2 text-xs text-muted-foreground">
+          {current ? (
+            <>
+              Links generated below collect feedback into <b className="text-foreground">{current.name}</b>
+              {` (${day(current.startDate)} → ${day(current.endDate)})`}
+              {deadline ? (
+                <>
+                  {' · '}
+                  <span className={passed ? 'font-medium text-red-600' : undefined}>
+                    <CalendarClock className="mr-0.5 inline size-3" />
+                    {passed ? `deadline passed ${deadline}` : `deadline ${deadline}`}
+                  </span>
+                </>
+              ) : null}
+              .
+              {selectable.length > 1 ? ' More than one cycle is active — check this is the right one before sending.' : ''}
+            </>
+          ) : null}
+        </p>
+      </div>
+      {passed ? (
+        <p className="mt-2 text-xs text-red-600">
+          This cycle&rsquo;s submission deadline has passed. Links can still be generated, but a parent opening one is
+          refused. Extend the deadline on <b>Appraisals &rarr; Cycles</b> first.
+        </p>
+      ) : null}
+    </Card>
+  );
+}
+
+function StudentPanel({
+  student,
+  cycleId,
+  cycles,
+}: {
+  student: SisStudent;
+  cycleId: string;
+  cycles: EvalCycle[] | null;
+}): JSX.Element {
   const [parents, setParents] = useState<SisParent[] | null>(null);
   const [teachers, setTeachers] = useState<SisTeacherOfStudent[] | null>(null);
   const [links, setLinks] = useState<EvaluationLink[] | null>(null);
@@ -146,9 +276,21 @@ function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
     setNotice(null);
     setError(null);
     reloadRoster();
-    evalAdminApi.parentMode().then((m) => setMode(m.mode)).catch(() => setMode(null));
     reloadLinks();
   }, [student.id, reloadRoster, reloadLinks]);
+
+  /**
+   * Parent-feedback mode follows the CYCLE, not the student — consolidated versus one
+   * link per teacher is configured on the cycle's Parents quadrant. Kept in its own
+   * effect so changing the cycle re-reads it without re-fetching the roster.
+   */
+  useEffect(() => {
+    setMode(null);
+    evalAdminApi
+      .parentMode(cycleId || undefined)
+      .then((m) => setMode(m.mode))
+      .catch(() => setMode(null));
+  }, [cycleId]);
 
   /** One link for this student covering every teacher, when the cycle is set to consolidated mode. */
   async function generateConsolidated(send: boolean): Promise<void> {
@@ -161,6 +303,7 @@ function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
         parentId: parentId || undefined,
         send,
         channel: send ? channel : undefined,
+        cycleId: cycleId || undefined,
       });
       const skipped = link.skipped?.length
         ? ` ${link.skipped.length} teacher(s) skipped: ${link.skipped.map((x) => `${x.teacher} (${x.reason})`).join(', ')}.`
@@ -190,6 +333,7 @@ function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
         parentId: parentId || undefined,
         send,
         channel,
+        cycleId: cycleId || undefined,
       });
       setNotice({
         text: send
@@ -334,10 +478,10 @@ function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
               recorded against that teacher individually.
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => generateConsolidated(false)}>
+              <Button size="sm" variant="outline" disabled={busy !== null || !cycleId} onClick={() => generateConsolidated(false)}>
                 <Link2 /> Generate one form
               </Button>
-              <Button size="sm" disabled={busy !== null || !parentId} onClick={() => generateConsolidated(true)}>
+              <Button size="sm" disabled={busy !== null || !parentId || !cycleId} onClick={() => generateConsolidated(true)}>
                 <Send /> Generate &amp; send
               </Button>
             </div>
@@ -365,10 +509,10 @@ function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
                     <td className="p-3">{t.subject}{t.section ? <span className="text-muted-foreground"> · {t.section}</span> : null}</td>
                     <td className="p-3">
                       <div className="flex justify-end gap-2">
-                        <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => generate(t, false)}>
+                        <Button size="sm" variant="outline" disabled={busy !== null || !cycleId} onClick={() => generate(t, false)}>
                           <Link2 /> Generate
                         </Button>
-                        <Button size="sm" disabled={busy !== null || !parentId} onClick={() => generate(t, true)}>
+                        <Button size="sm" disabled={busy !== null || !parentId || !cycleId} onClick={() => generate(t, true)}>
                           <Send /> Generate &amp; send
                         </Button>
                       </div>
@@ -441,6 +585,22 @@ function StudentPanel({ student }: { student: SisStudent }): JSX.Element {
                     <td className="p-3">
                       <p className="font-medium">{l.teacher ?? (l.mode === 'consolidated' ? 'All teachers' : '—')}</p>
                       <p className="text-xs text-muted-foreground">{l.subject ?? (l.mode === 'consolidated' ? 'one form, every teacher' : '')}</p>
+                      {/* Which cycle this link actually feeds. Rows generated before the
+                          cycle was switched — or while a different one was active — are
+                          otherwise indistinguishable from the ones being made now. */}
+                      {l.cycleId ? (
+                        <p
+                          className={`text-xs ${l.cycleId === cycleId ? 'text-muted-foreground' : 'font-medium text-amber-600'}`}
+                          title={
+                            l.cycleId === cycleId
+                              ? 'This link feeds the cycle selected above'
+                              : 'This link feeds a different cycle from the one selected above'
+                          }
+                        >
+                          <CalendarClock className="mr-0.5 inline size-3" />
+                          {cycleName(cycles, l.cycleId)}
+                        </p>
+                      ) : null}
                     </td>
                     <td className="p-3 text-xs text-muted-foreground">{l.mode === 'consolidated' ? 'Consolidated' : 'Per teacher'}</td>
                     <td className="p-3"><Badge variant={STATUS_VARIANT[l.status] ?? 'neutral'}>{l.status}</Badge></td>

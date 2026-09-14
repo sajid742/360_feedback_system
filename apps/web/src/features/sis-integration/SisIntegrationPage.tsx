@@ -206,9 +206,35 @@ export function SisIntegrationPage(): JSX.Element {
         <Card className="grid gap-4 p-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="flex items-center gap-2 text-sm font-bold"><Upload className="size-4 text-brand" /> Import roster (Excel / CSV)</h2>
-            <Button variant="ghost" size="sm" onClick={() => sisApi.downloadTemplate()}><Download className="size-4" /> Download template</Button>
+            <div className="flex flex-wrap items-center gap-1">
+              <Button variant="ghost" size="sm" onClick={() => sisApi.downloadTemplate('simple')}><Download className="size-4" /> Roster (1 sheet)</Button>
+              <Button variant="ghost" size="sm" onClick={() => sisApi.downloadTemplate('full')}><Download className="size-4" /> Full template (5 sheets)</Button>
+            </div>
           </div>
-          <p className="text-xs text-muted-foreground">Upload the multi-sheet template (Students, Guardians, Teachers, TeachingAssignments, Enrollments) or a single CSV. Existing records update in place, matched on <code>student_id</code> — a student who changes class or teacher stays the same student. Students/teachers no longer present are deactivated (never deleted); teachers whose <code>employee_code</code> matches a 360 employee auto-link for parent feedback. An import that would deactivate, rename or re-point anything stops and shows you the list first.</p>
+          {/*
+            Two templates, one importer, EQUAL capability. The single sheet is not a
+            cut-down version — it carries the whole student → subject → teacher chain by
+            repeating the student across their subjects. The choice is about the shape
+            your data already has, not about how much of the product you can use.
+          */}
+          <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+            <div className="rounded-md border border-border p-2.5">
+              <div className="font-semibold text-foreground">Roster — one sheet</div>
+              <strong>One row per student per subject.</strong> A student taking four subjects has four
+              rows, with their name, class, section and parent details repeated on each — the repetition
+              is expected. Fill <code>Teacher Employee Code</code> and <code>Subject</code> and it covers
+              everything the five-sheet template does, including parent feedback on teachers. Leave those
+              blank and it is a plain student roster.
+            </div>
+            <div className="rounded-md border border-border p-2.5">
+              <div className="font-semibold text-foreground">Full template — five sheets</div>
+              Students, Guardians, Teachers, TeachingAssignments and Enrollments as separate sheets.
+              Use it when your SIS already exports in that shape, or when you need several guardians per
+              student. Same result, same importer.
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">Either way, a teacher is matched to their 360 employee by <code>employee_code</code> — that match is what routes a parent&apos;s feedback onto the teacher&apos;s own appraisal.</p>
+          <p className="text-xs text-muted-foreground">A single CSV works too. Existing records update in place, matched on <code>student_id</code> — a student who changes class or teacher stays the same student. Students/teachers no longer present are deactivated (never deleted). An import that would deactivate, rename or re-point anything stops and shows you the list first.</p>
           <div className="flex flex-wrap items-center gap-2">
             <input ref={fileRef} type="file" accept=".xlsx,.csv" className="text-sm" />
             <Button variant="outline" size="sm" onClick={() => runImport(true)} disabled={!!busy}>{busy === 'dry' ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Validate / preview</Button>

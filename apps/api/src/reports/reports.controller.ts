@@ -1,6 +1,8 @@
 import { Body, Controller, Delete, ForbiddenException, Get, Param, ParseUUIDPipe, Put, Query, Res, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { JwtAuthGuard } from '../common/auth/jwt-auth.guard';
+import { LicensedFeatureGuard, RequiresLicensedModule } from '../license/licensed-feature.guard';
+import { EntitlementService } from '../license/entitlement.service';
 import { PermissionsGuard } from '../common/auth/permissions.guard';
 import { RequirePermissions } from '../common/auth/require-permissions.decorator';
 import { CurrentUser, ReqContext, type AuthUser, type RequestContext } from '../common/auth/current-user';
@@ -12,9 +14,17 @@ import { UpdateFeedbackRulesDto } from './reports.dto';
 import { ScopeService } from '../rbac/scope.service';
 import { FeedbackAuditService } from '../feedback-audit/feedback-audit.service';
 
+/**
+ * The SPA has always hidden /reports behind `LicensedRoute module="reports"`, but this
+ * controller carried no server-side gate — so a user with `reports.read` in an
+ * organisation whose plan excludes reporting could still call the API directly. The
+ * class-level gate closes that; the per-route `reports_advanced` gates below put the
+ * executive tier behind the plan that pays for it.
+ */
 @Controller('reports')
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, LicensedFeatureGuard)
 @RequirePermissions(P.read)
+@RequiresLicensedModule('reports')
 export class ReportsController {
   constructor(
     private readonly reports: ReportsService,
@@ -22,6 +32,7 @@ export class ReportsController {
     private readonly scope: ScopeService,
     private readonly feedbackAudit: FeedbackAuditService,
     private readonly layouts: DashboardLayoutService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   /* ---- Feedback rules: anonymity threshold + target score (F-C4) ---- */
@@ -45,6 +56,7 @@ export class ReportsController {
   /* ---- Configurable dashboard layouts (Executive / HR) ---- */
 
   /** Read the saved layout for a dashboard (null = default). Any dashboard viewer. */
+  @RequiresLicensedModule('reports_advanced')
   @Get('dashboard-layout/:type')
   @RequirePermissions(P.executive)
   getLayout(@CurrentUser() user: AuthUser, @Param('type') type: string) {
@@ -52,6 +64,7 @@ export class ReportsController {
   }
 
   /** Publish a customized layout. Requires the dashboard-configure permission. */
+  @RequiresLicensedModule('reports_advanced')
   @Put('dashboard-layout/:type')
   @RequirePermissions(P.dashboardConfigure)
   saveLayout(@CurrentUser() user: AuthUser, @Param('type') type: string, @Body() body: DashboardLayout) {
@@ -59,6 +72,7 @@ export class ReportsController {
   }
 
   /** Reset a dashboard to its default layout (deletes the saved row). */
+  @RequiresLicensedModule('reports_advanced')
   @Delete('dashboard-layout/:type')
   @RequirePermissions(P.dashboardConfigure)
   async resetLayout(@CurrentUser() user: AuthUser, @Param('type') type: string) {
@@ -71,6 +85,7 @@ export class ReportsController {
    * Gated to executive/HR viewers (F-C8): the institutional export contains named
    * top/bottom performers, which must not be downloadable by peers or subordinates.
    */
+  @RequiresLicensedModule('exports')
   @Get('export')
   @RequirePermissions(P.executive)
   async export(
@@ -81,6 +96,9 @@ export class ReportsController {
     @Query('format') format: ExportFormat = 'xlsx',
     @Query('cycleId') cycleId?: string,
   ): Promise<void> {
+    // The module gate above answers "may this organisation export at all?"; this
+    // answers "in this format?", which is how the plans differ.
+    await this.entitlements.assertExportFormat(user.organizationId, format as 'csv' | 'xlsx' | 'pdf');
     const result = await this.exports.export(user.organizationId, type, format, cycleId);
     await this.feedbackAudit.record({
       organizationId: user.organizationId,
@@ -121,6 +139,7 @@ export class ReportsController {
   }
 
   // Person-identifying talent grid — an executive/HR view, not for peers/subordinates. (DEF-02)
+  @RequiresLicensedModule('reports_advanced')
   @Get('nine-box')
   @RequirePermissions(P.executive)
   nineBox(@CurrentUser() user: AuthUser, @Query('cycleId') cycleId?: string) {
@@ -134,6 +153,7 @@ export class ReportsController {
   }
 
   /** Executive dashboard bundle — gated by a dedicated permission. */
+  @RequiresLicensedModule('reports_advanced')
   @Get('executive')
   @RequirePermissions(P.executive)
   executive(@CurrentUser() user: AuthUser, @Query('cycleId') cycleId?: string) {
@@ -141,6 +161,7 @@ export class ReportsController {
   }
 
   /** HR dashboard bundle — operational HR view, gated like the executive one. */
+  @RequiresLicensedModule('reports_advanced')
   @Get('hr')
   @RequirePermissions(P.executive)
   hr(@CurrentUser() user: AuthUser, @Query('cycleId') cycleId?: string) {
@@ -185,12 +206,14 @@ export class ReportsController {
     return this.reports.drilldownCompetency(user.organizationId, { cycleId, competency, belowTarget: belowTarget === '1' || belowTarget === 'true' });
   }
 
+  @RequiresLicensedModule('reports_advanced')
   @Get('trend')
   async trend(@CurrentUser() user: AuthUser) {
     await this.reports.assertAggregateVisible(user);
     return this.reports.trend(user.organizationId);
   }
 
+  @RequiresLicensedModule('reports_advanced')
   @Get('heatmap')
   async heatmap(@CurrentUser() user: AuthUser, @Query('cycleId') cycleId?: string) {
     await this.reports.assertAggregateVisible(user);

@@ -33,7 +33,10 @@ export class UserNotificationService {
 
   async list(user: AuthUser): Promise<Record<string, unknown>[]> {
     const rows = await this.prisma.userNotification.findMany({
-      where: { userId: user.userId },
+      // Scoped by organisation as well as user. `userId` alone was enough while every
+      // token was well formed, but this table carries `organizationId` and a query that
+      // ignores it has no second line of defence.
+      where: { userId: user.userId, organizationId: user.organizationId },
       orderBy: { createdAt: 'desc' },
       take: 30,
     });
@@ -59,17 +62,17 @@ export class UserNotificationService {
   }
 
   async unreadCount(user: AuthUser): Promise<{ count: number }> {
-    const count = await this.prisma.userNotification.count({ where: { userId: user.userId, readAt: null } });
+    const count = await this.prisma.userNotification.count({ where: { userId: user.userId, organizationId: user.organizationId, readAt: null } });
     return { count };
   }
 
   async markRead(user: AuthUser, id: string): Promise<{ id: string }> {
-    await this.prisma.userNotification.updateMany({ where: { id, userId: user.userId, readAt: null }, data: { readAt: new Date() } });
+    await this.prisma.userNotification.updateMany({ where: { id, userId: user.userId, organizationId: user.organizationId, readAt: null }, data: { readAt: new Date() } });
     return { id };
   }
 
   async markAllRead(user: AuthUser): Promise<{ updated: number }> {
-    const res = await this.prisma.userNotification.updateMany({ where: { userId: user.userId, readAt: null }, data: { readAt: new Date() } });
+    const res = await this.prisma.userNotification.updateMany({ where: { userId: user.userId, organizationId: user.organizationId, readAt: null }, data: { readAt: new Date() } });
     return { updated: res.count };
   }
 }

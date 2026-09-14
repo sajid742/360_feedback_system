@@ -1601,3 +1601,221 @@ CREATE INDEX IF NOT EXISTS ix_evaluation_link_targets_assignment ON evaluation_l
 INSERT INTO schema_migrations (version, description)
 VALUES ('2026.08.21-01', 'Consolidated parent feedback: feedback_sources.parent_mode/parent_require_all, evaluation_links.mode, evaluation_link_targets')
 ON CONFLICT (version) DO NOTHING;
+
+-- ============================================================================
+-- SaaS subscriptions (2026.09.11-01)
+--
+-- WHY A TABLE AND NOT `configurations`. Licensing stores its payload in
+-- `configurations` because that table was already tenant-scoped JSONB and needed no
+-- migration. A subscription cannot live there: POST /api/v1/configuration accepts a
+-- free-form module/key from any user holding `configuration.manage`, so a tenant
+-- administrator could write their own plan. Billing state must have no tenant-facing
+-- write path at all.
+--
+-- One row per ROOT organisation. A campus is an `organizations` row too, so the guard
+-- against a campus acquiring its own plan lives in the service, and the partial unique
+-- index below keeps one live subscription per organisation either way.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id          UUID NOT NULL REFERENCES organizations(id),
+  -- starter | professional | enterprise. Deliberately a varchar and not an enum: a new
+  -- plan is a product decision and must not need a type migration.
+  plan_code                VARCHAR(32)  NOT NULL DEFAULT 'starter',
+  -- trialing | active | past_due | grace | expired | suspended | cancelled
+  status                   VARCHAR(20)  NOT NULL DEFAULT 'active',
+  trial_ends_at            TIMESTAMPTZ,
+  current_period_start     TIMESTAMPTZ,
+  current_period_end       TIMESTAMPTZ,
+  grace_days               INT          NOT NULL DEFAULT 7,
+  -- Per-tenant deviations from the plan defaults, so raising one customer's employee
+  -- cap is a field edit rather than a release.
+  limit_overrides          JSONB        NOT NULL DEFAULT '{}'::jsonb,
+  -- { "add": ["sis_integration"], "remove": ["ai_insights"] }
+  module_overrides         JSONB        NOT NULL DEFAULT '{}'::jsonb,
+  -- Present from day one so adding Stripe later is an addition, not a migration.
+  external_customer_id     VARCHAR(120),
+  external_subscription_id VARCHAR(120),
+  notes                    TEXT,
+  created_at               TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at               TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  created_by               UUID,
+  updated_by               UUID,
+  deleted_at               TIMESTAMPTZ
+);
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS plan_code                VARCHAR(32)  NOT NULL DEFAULT 'starter';
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS status                   VARCHAR(20)  NOT NULL DEFAULT 'active';
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS trial_ends_at            TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_start     TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_end       TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS grace_days               INT          NOT NULL DEFAULT 7;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS limit_overrides          JSONB        NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS module_overrides         JSONB        NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS external_customer_id     VARCHAR(120);
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS external_subscription_id VARCHAR(120);
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS notes                    TEXT;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS created_by               UUID;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS updated_by               UUID;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS deleted_at               TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_subscription_org ON subscriptions(organization_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_subscriptions_status ON subscriptions(status) WHERE deleted_at IS NULL;
+
+-- Platform administrators — the vendor's own operators.
+--
+-- Deliberately NOT a row in `roles`. Every tenant's Super Admin holds
+-- `security.rbac.manage`, so a platform role inside tenant RBAC could be self-assigned
+-- and would turn one customer's administrator into an operator of every customer. The
+-- boundary has to be structural, which is why this is its own table and its own guard.
+CREATE TABLE IF NOT EXISTS platform_admins (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    UUID NOT NULL REFERENCES users(id),
+  label      VARCHAR(120),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_by UUID,
+  deleted_at TIMESTAMPTZ
+);
+ALTER TABLE platform_admins ADD COLUMN IF NOT EXISTS label      VARCHAR(120);
+ALTER TABLE platform_admins ADD COLUMN IF NOT EXISTS created_by UUID;
+ALTER TABLE platform_admins ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_admin_user ON platform_admins(user_id) WHERE deleted_at IS NULL;
+
+INSERT INTO schema_migrations (version, description)
+VALUES ('2026.09.11-01', 'SaaS subscriptions: subscriptions, platform_admins')
+ON CONFLICT (version) DO NOTHING;
+
+-- ============================================================================
+-- Billing (2026-09-12)
+--
+-- MONEY IS STORED AS INTEGER MINOR UNITS (paisa), never a float. A price is an
+-- exact quantity; binary floating point is not, and "2999.99" is the kind of
+-- rounding error that turns into an argument with a customer.
+--
+-- NO CARD DATA. There is deliberately nowhere in this schema to put a card number,
+-- an expiry or a CVV, and there never should be. Payment happens by bank transfer
+-- today and through a provider's hosted page later; either way the sensitive part
+-- never reaches this application.
+-- ============================================================================
+
+-- What a plan costs. Separate from the code catalogue so a price can change without
+-- a release: the catalogue in `plans.ts` carries features and limits, this carries
+-- money, and a platform administrator edits it.
+CREATE TABLE IF NOT EXISTS plan_prices (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  plan_code         VARCHAR(32)  NOT NULL,
+  currency          VARCHAR(3)   NOT NULL DEFAULT 'PKR',
+  -- month | year
+  interval          VARCHAR(10)  NOT NULL DEFAULT 'month',
+  amount_minor      BIGINT       NOT NULL DEFAULT 0,
+  -- The provider's own price/plan identifier, when one exists. Empty for invoice
+  -- billing; populated when a gateway is added, which is what keeps our plan codes
+  -- and the provider's ids mapped without a second table.
+  provider          VARCHAR(24)  NOT NULL DEFAULT 'invoice',
+  provider_price_id VARCHAR(120),
+  is_active         BOOLEAN      NOT NULL DEFAULT true,
+  effective_from    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_by        UUID,
+  deleted_at        TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_price ON plan_prices(plan_code, currency, interval, provider) WHERE deleted_at IS NULL;
+
+-- What a customer owes.
+CREATE TABLE IF NOT EXISTS invoices (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id     UUID NOT NULL REFERENCES organizations(id),
+  subscription_id     UUID REFERENCES subscriptions(id),
+  -- Human-facing, quoted on the bank transfer: INV-2026-0001.
+  number              VARCHAR(32)  NOT NULL,
+  plan_code           VARCHAR(32)  NOT NULL,
+  interval            VARCHAR(10)  NOT NULL DEFAULT 'month',
+  currency            VARCHAR(3)   NOT NULL DEFAULT 'PKR',
+  subtotal_minor      BIGINT       NOT NULL DEFAULT 0,
+  tax_minor           BIGINT       NOT NULL DEFAULT 0,
+  total_minor         BIGINT       NOT NULL DEFAULT 0,
+  -- draft | open | paid | void | uncollectible
+  status              VARCHAR(20)  NOT NULL DEFAULT 'open',
+  -- The period this invoice buys. Applied to the subscription when it is paid.
+  period_start        TIMESTAMPTZ,
+  period_end          TIMESTAMPTZ,
+  issued_at           TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  due_at              TIMESTAMPTZ,
+  paid_at             TIMESTAMPTZ,
+  provider            VARCHAR(24)  NOT NULL DEFAULT 'invoice',
+  provider_invoice_id VARCHAR(120),
+  notes               TEXT,
+  created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  created_by          UUID,
+  updated_by          UUID,
+  deleted_at          TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_invoice_number ON invoices(number) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_invoices_org ON invoices(organization_id, issued_at DESC);
+CREATE INDEX IF NOT EXISTS ix_invoices_status ON invoices(status) WHERE deleted_at IS NULL;
+
+-- What they actually paid. One invoice can have several (a part payment, then a refund).
+CREATE TABLE IF NOT EXISTS payments (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id     UUID NOT NULL REFERENCES organizations(id),
+  invoice_id          UUID REFERENCES invoices(id),
+  provider            VARCHAR(24)  NOT NULL DEFAULT 'invoice',
+  provider_payment_id VARCHAR(120),
+  -- bank_transfer | cheque | cash | card | complimentary
+  method              VARCHAR(24)  NOT NULL DEFAULT 'bank_transfer',
+  currency            VARCHAR(3)   NOT NULL DEFAULT 'PKR',
+  amount_minor        BIGINT       NOT NULL DEFAULT 0,
+  -- succeeded | failed | refunded
+  status              VARCHAR(20)  NOT NULL DEFAULT 'succeeded',
+  -- The payer's own reference — the bank transaction id or cheque number. This is
+  -- what makes a recorded payment checkable against a bank statement later.
+  reference           VARCHAR(200),
+  failure_reason      TEXT,
+  paid_at             TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  recorded_by         UUID,
+  notes               TEXT,
+  created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  deleted_at          TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ix_payments_org ON payments(organization_id, paid_at DESC);
+CREATE INDEX IF NOT EXISTS ix_payments_invoice ON payments(invoice_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_provider_id ON payments(provider, provider_payment_id) WHERE provider_payment_id IS NOT NULL AND deleted_at IS NULL;
+
+-- Every webhook this installation has ever received.
+--
+-- `provider_event_id` carries the UNIQUE index, and that index — not application
+-- logic — is what makes processing idempotent. A provider that retries after a
+-- timeout hits the conflict and the second delivery does nothing.
+CREATE TABLE IF NOT EXISTS billing_events (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider          VARCHAR(24)  NOT NULL,
+  provider_event_id VARCHAR(160) NOT NULL,
+  type              VARCHAR(120) NOT NULL,
+  signature_valid   BOOLEAN      NOT NULL DEFAULT false,
+  -- received | processed | ignored | failed
+  status            VARCHAR(20)  NOT NULL DEFAULT 'received',
+  organization_id   UUID REFERENCES organizations(id),
+  payload           JSONB        NOT NULL DEFAULT '{}'::jsonb,
+  error             TEXT,
+  received_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  processed_at      TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_event ON billing_events(provider, provider_event_id);
+CREATE INDEX IF NOT EXISTS ix_billing_events_received ON billing_events(received_at DESC);
+
+-- Billing shape on the subscription itself.
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS billing_interval     VARCHAR(10) NOT NULL DEFAULT 'month';
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS cancel_at_period_end BOOLEAN     NOT NULL DEFAULT false;
+
+-- The subscription lifecycle job moves a tenant from trialing to grace to expired on a
+-- date, with no person involved. Those transitions belong in the tenant's own audit log
+-- -- a customer asking "why did this stop working?" deserves an answer they can see --
+-- but audit_logs.user_id was NOT NULL, so a scheduled job could not write one without
+-- inventing a fake user id. Relaxing the column is the honest fix: NULL means "the
+-- system did this", which is exactly what happened. Every existing row is unaffected and
+-- every human-initiated write still carries its user.
+ALTER TABLE audit_logs ALTER COLUMN user_id DROP NOT NULL;
+
+INSERT INTO schema_migrations (version, description)
+VALUES ('2026.09.12-01', 'Billing: plan_prices, invoices, payments, billing_events; subscription billing_interval + cancel_at_period_end; audit_logs.user_id nullable for system actions')
+ON CONFLICT (version) DO NOTHING;

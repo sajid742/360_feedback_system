@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
+  IsDefined,
   IsIn,
   IsNumber,
   IsOptional,
@@ -20,7 +21,17 @@ export class SetConfigurationDto {
   @Length(1, 120)
   key!: string;
 
-  // JSON value — any shape.
+  /**
+   * The JSON value — any shape.
+   *
+   * `@IsDefined()` IS LOAD-BEARING, and not for the validation. The global
+   * `ValidationPipe` runs with `whitelist: true`, which strips every property that
+   * carries no validation decorator — so an undecorated `value` never reached the
+   * service at all, Prisma was handed `undefined`, and EVERY `POST /configuration`
+   * answered 500 regardless of the module. Any decorator fixes it; this one also turns
+   * a genuinely missing value into a 400 that says so instead of a server error.
+   */
+  @IsDefined()
   value!: unknown;
 }
 

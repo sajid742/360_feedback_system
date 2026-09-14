@@ -1,7 +1,7 @@
-import { CanActivate, type ExecutionContext, Injectable, NotFoundException, SetMetadata } from '@nestjs/common';
+import { CanActivate, type ExecutionContext, Injectable, SetMetadata } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { AuthUser } from '../common/auth/current-user';
-import { LicenseService } from './license.service';
+import { EntitlementService } from './entitlement.service';
 import type { LicensedModule } from './license.types';
 
 export const LICENSED_MODULE_KEY = 'licensedModule';
@@ -28,7 +28,7 @@ export const RequiresLicensedModule = (module: LicensedModule): MethodDecorator 
 export class LicensedFeatureGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
-    private readonly license: LicenseService,
+    private readonly entitlements: EntitlementService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -40,7 +40,9 @@ export class LicensedFeatureGuard implements CanActivate {
     const user = context.switchToHttp().getRequest<{ user?: AuthUser }>().user;
     // Unauthenticated callers are the auth guards' problem, not this one's.
     if (!user?.organizationId) return true;
-    if (await this.license.hasModule(user.organizationId, module)) return true;
-    throw new NotFoundException('This module is not included in your licence.');
+    // Delegates to the entitlement service so one resolution order — subscription,
+    // then licence, then development — governs every gate in the application.
+    await this.entitlements.assertModule(user.organizationId, module);
+    return true;
   }
 }
