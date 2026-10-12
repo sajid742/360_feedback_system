@@ -1,0 +1,19 @@
+{
+  "previewPort": 3000,
+  "healthPath": "/",
+  "startCommand": "docker compose -f docker-compose.base44.yml up -d --build",
+  "secrets": [
+    {
+      "name": "JWT_ACCESS_SECRET",
+      "description": "Signs the access tokens that carry the tenant (organizationId) and permissions. The API refuses to start without a real value (>= 32 chars, not a known placeholder). Generated for this sandbox; replace it with your own before any shared deployment (openssl rand -hex 32).",
+      "requiredAtBoot": true,
+      "generatedForDevelopment": true
+    },
+    {
+      "name": "MFA_ENCRYPTION_KEY",
+      "description": "Encrypts MFA secrets and stored HR/SIS provider credentials. Must be exactly 64 hex characters (32 bytes). Generated for this sandbox; replacing it makes previously stored encrypted provider secrets unreadable, so pair a change with re-entering them.",
+      "requiredAtBoot": true,
+      "generatedForDevelopment": true
+    }
+  ]
+}

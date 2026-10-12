@@ -1,0 +1,277 @@
+# Enterprise 360 — Base44 sandbox development stack.
+#
+#   docker compose -f docker-compose.base44.yml up -d --build
+#
+# This is NOT the repo's own compose.yaml. That one builds the release images
+# (COPY . . → prebuilt assets behind nginx), which freeze the code: an edit in the
+# sandbox would never appear. This file runs every application service FROM THE
+# CLONED SOURCE on a plain Node runtime, with the repository bind-mounted and the
+# project's own dev/watch command, so edits are live.
+#
+#   postgres   16-alpine            infrastructure (own database volume)
+#   redis      7-alpine             BullMQ delivery queue (optional for the API)
+#   deps       one-shot             npm ci from the lockfile + Prisma client generate
+#   db-init    one-shot             ops/docker-init.sh: schema, seeds, demo tenant
+#   api        NestJS, watch        :3000 inside the network (not published)
+#   mock-sis   NestJS, watch        :3100, the vendor-style SIS the API integrates with
+#   web        Vite dev server      5173 inside → host port 3000 (the preview entry point)
+#
+# Only port 3000 is published (single-origin wiring): the browser talks to the Vite
+# dev server, which proxies /api/v1, /r/:code and /qr to the api container — exactly
+# the from-source development path, so cookies/sessions stay same-origin and the API
+# never needs CORS for the preview.
+#
+# WAHA (WhatsApp, compose.yaml) is deliberately absent: connecting it needs a QR scan
+# with a real phone and it is not required by any screen used for a first look.
+#
+# Secrets are read from /run/base44/app.env — the platform-managed file outside the
+# repo (never committed), holding JWT_ACCESS_SECRET and MFA_ENCRYPTION_KEY. Because
+# nothing user-supplied is placed under `environment:`, a value replaced in the
+# dashboard always wins.
+name: e360-base44
+
+x-node-app: &node-app
+  build:
+    context: .
+    dockerfile: Dockerfile.base44-node
+  image: e360-base44-node
+  working_dir: /app
+  volumes:
+    # Live source. node_modules lives here too (gitignored), installed once by `deps`
+    # and shared by every service — never deleted, never installed concurrently.
+    - .:/app
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: on-failure
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: enterprise360
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d enterprise360']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: on-failure
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # One-shot dependency install. Runs BEFORE anything that needs node_modules, so the
+  # install is never concurrent with another installer and is re-run only when the
+  # lockfile is newer than the last install (a package change is a rebuild trigger).
+  deps:
+    <<: *node-app
+    restart: 'no'
+    environment:
+      NODE_ENV: development
+      # The UI smoke test (npm run test:ui) needs browsers; the sandbox preview does not,
+      # and the download is hundreds of MB on every fresh install.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    command:
+      - sh
+      - -ec
+      - |
+        if [ ! -f node_modules/.package-lock.json ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+          echo "▸ installing workspace dependencies from package-lock.json"
+          npm ci --no-audit --no-fund
+        else
+          echo "▸ dependencies already in sync with package-lock.json"
+        fi
+        # Prisma is pinned to 5.22.0 and the client must be generated before the API
+        # starts (no Prisma Migrate in this project — see README).
+        npm --workspace apps/api run db:generate
+
+  # One-shot initialisation, the project's own script and seed chain: creates the
+  # mock_sis database alongside enterprise360, applies database/000_initial_schema.sql
+  # + 001_reconcile.sql, seeds permissions/roles, bootstraps the CARE tenant with its
+  # administrator, and seeds the demo content. Every step is idempotent, so this is a
+  # fast no-op on later `up`s.
+  db-init:
+    <<: *node-app
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      deps:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: enterprise360
+      MOCK_SIS_DB: mock_sis
+      ORG_NAME: CARE Pvt. Ltd.
+      ORG_SLUG: care
+      ADMIN_EMAIL: sajidq@carepvtltd.com
+      ADMIN_PASSWORD: Password123!
+      SEED_DEMO_DATA: 'true'
+    command: ['bash', 'ops/docker-init.sh']
+
+  api:
+    <<: *node-app
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    env_file:
+      - /run/base44/app.env
+    environment:
+      NODE_ENV: development
+      PORT: '3000'
+      BASE44_PREVIEW_MODE: ${BASE44_PREVIEW_MODE:-}
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/enterprise360
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      # The address the BROWSER uses, so generated links (parent-evaluation links,
+      # password resets, QR codes) point back at the live preview. Referenced, never
+      # hardcoded — the sandbox host changes when the environment is recreated.
+      PUBLIC_APP_URL: https://3000-${BASE44_PUBLIC_HOST_SUFFIX:-localhost}
+      CORS_ORIGIN: https://3000-${BASE44_PUBLIC_HOST_SUFFIX:-localhost}
+      # Mock SIS is a separate container: service name, never localhost. The key must
+      # match the mock-sis service's value or every vendor call is refused.
+      SIS_PROVIDER: mock
+      SIS_BASE_URL: http://mock-sis:3100/api/v1
+      SIS_API_KEY: mock-sis-dev-key-change-me
+      DEFAULT_ORG_SLUG: care
+      LOG_FORMAT: json
+      LOG_LEVEL: log
+      TZ: UTC
+    healthcheck:
+      # /health and /ready sit at the ROOT, outside the /api/v1 prefix. Probes real
+      # application responsiveness, not just an open port.
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          const http = require('http');
+          const req = http.get('http://localhost:3000/health', (r) => {
+            if (r.statusCode === 200) process.exit(0);
+            console.error('api /health returned HTTP ' + r.statusCode);
+            process.exit(1);
+          });
+          req.setTimeout(4000, () => { console.error('api /health timed out'); process.exit(1); });
+          req.on('error', (e) => { console.error('api /health unreachable: ' + e.message); process.exit(1); });
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      # First run compiles the whole NestJS app under `nest start --watch`.
+      start_period: 90s
+    command: ['sh', '-ec', 'exec npm --workspace apps/api run dev']
+
+  mock-sis:
+    <<: *node-app
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      deps:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: development
+      PORT: '3100'
+      BASE44_PREVIEW_MODE: ${BASE44_PREVIEW_MODE:-}
+      # The mock-sis Prisma schema reads MOCK_SIS_DATABASE_URL — not DATABASE_URL.
+      MOCK_SIS_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/mock_sis
+      SIS_API_KEY: mock-sis-dev-key-change-me
+    healthcheck:
+      # Its health route is NOT excluded from the global prefix, so it answers at
+      # /api/v1/health rather than /health.
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          const http = require('http');
+          const req = http.get('http://localhost:3100/api/v1/health', (r) => {
+            if (r.statusCode === 200) process.exit(0);
+            console.error('mock-sis /api/v1/health returned HTTP ' + r.statusCode);
+            process.exit(1);
+          });
+          req.setTimeout(4000, () => { console.error('mock-sis health timed out'); process.exit(1); });
+          req.on('error', (e) => { console.error('mock-sis unreachable: ' + e.message); process.exit(1); });
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 60s
+    command: ['sh', '-ec', 'exec npm --workspace apps/mock-sis run dev']
+
+  web:
+    <<: *node-app
+    restart: on-failure
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+    ports:
+      # THE preview entry point: host 3000 → the Vite dev server.
+      - '3000:5173'
+    environment:
+      NODE_ENV: development
+      BASE44_PREVIEW_MODE: ${BASE44_PREVIEW_MODE:-}
+      # Vite proxies the API paths from inside this container, where the backend is a
+      # separate service — http://localhost:3000 would be the web container itself.
+      VITE_PROXY_TARGET: http://api:3000
+      # Extends Vite's dev-server host allowlist when the framework enforces one
+      # (Vite ≥ 6.1); harmless on the 5.x line, which does not check Host.
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: ${BASE44_SANDBOX_HOST_DOMAIN:-}
+    healthcheck:
+      # Two components matter here: the dev server must serve the app AND compile its
+      # entry module (a broken import fails the module request, not index.html), while
+      # the proxied API is what every screen actually calls.
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          const http = require('http');
+          const get = (path) => new Promise((resolve) => {
+            const req = http.get({ host: 'localhost', port: 5173, path }, (r) => {
+              r.resume();
+              resolve(r.statusCode);
+            });
+            req.setTimeout(8000, () => { req.destroy(); resolve(0); });
+            req.on('error', () => resolve(0));
+          });
+          (async () => {
+            const [root, entry, proxied] = await Promise.all([
+              get('/'),
+              get('/src/main.tsx'),
+              get('/api/v1/health'),
+            ]);
+            if (root === 200 && entry === 200 && proxied < 500 && proxied !== 0) process.exit(0);
+            console.error(
+              'web stack unhealthy — dev server root=' + root +
+              ', entry module=' + entry +
+              ', proxied api=' + proxied,
+            );
+            process.exit(1);
+          })();
+      interval: 20s
+      timeout: 12s
+      retries: 5
+      start_period: 60s
+    command: ['sh', '-ec', 'exec npm --workspace apps/web run dev']
+
+volumes:
+  pgdata:
+  redisdata:

@@ -4,6 +4,14 @@ import path from 'node:path';
 
 // Dev server proxies API paths to the NestJS backend on port 3000 so the
 // frontend can use relative /api/v1 without CORS in dev.
+//
+// Target defaults to the from-source API on localhost:3000 and is overridden with
+// VITE_PROXY_TARGET only when the API is NOT on this machine's loopback — the Base44
+// sandbox stack (docker-compose.base44.yml) runs the web dev server in its own
+// container, where the backend is the `api` service (http://api:3000); localhost
+// there would be the web container itself. Unset ⇒ exactly the previous behavior.
+const apiTarget = process.env.VITE_PROXY_TARGET ?? 'http://localhost:3000';
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -26,12 +34,12 @@ export default defineConfig({
       // Proxy targets stay `localhost` on purpose — they are resolved by the Vite
       // process on this machine, not by the visiting browser. The browser only ever
       // requests a relative /api/v1 path from whichever host it loaded the page from.
-      '/api/v1': 'http://localhost:3000',
+      '/api/v1': apiTarget,
       // Use path-boundary regexes so SPA routes that merely START with these
       // letters (e.g. /reports, /radar) are NOT proxied to the API — only the
       // real short-link (/r/:code) and QR (/qr...) endpoints are. (DEF-06)
-      '^/r/': 'http://localhost:3000',
-      '^/qr': 'http://localhost:3000',
+      '^/r/': apiTarget,
+      '^/qr': apiTarget,
     },
   },
 });

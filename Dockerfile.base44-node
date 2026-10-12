@@ -1,0 +1,25 @@
+# Shared runtime base for the Base44 sandbox dev stack (docker-compose.base44.yml).
+#
+# WHY THIS EXISTS. The repo's own Dockerfiles (apps/api/Dockerfile, apps/web/Dockerfile)
+# are release images: they `COPY . .` and bake the compiled source in, so an edit here
+# would never show up in the running container. Every app service in the Base44 stack
+# therefore runs on this plain Node runtime instead, with the repository bind-mounted at
+# /app and the project's own dev/watch command, so source edits are live.
+#
+# The image carries no application source. It only provides the OS packages the apps
+# need at runtime:
+#   - openssl            — required by Prisma's query engine
+#   - ca-certificates    — outbound HTTPS (e-mail/SMS providers, Prisma engine download)
+#   - postgresql-client  — psql, used by the one-shot db-init service (ops/docker-init.sh)
+FROM node:20-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl ca-certificates postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# api 3000 · mock-sis 3100 · web (vite dev) 5173
+EXPOSE 3000 3100 5173
+
+CMD ["bash"]
